@@ -167,16 +167,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsMenu.addItem(.separator())
 
         for (i, adapter) in allTerminalAdapters.enumerated() {
-            let available = adapter.isAvailable()
-            let title = "\(adapter.icon) \(adapter.name)\(available ? "" : " (not found)")"
-            let item = NSMenuItem(title: title, action: available ? #selector(selectTerminal(_:)) : nil, keyEquivalent: "")
+            guard adapter.isAvailable() else { continue }
+            let title = "\(adapter.icon) \(adapter.name)"
+            let item = NSMenuItem(title: title, action: #selector(selectTerminal(_:)), keyEquivalent: "")
             item.target = self
             item.tag = i
             if adapter.key == terminal.key,
                UserDefaults.standard.string(forKey: "terminalAdapter") != nil {
                 item.state = .on
             }
-            if !available { item.isEnabled = false }
             settingsMenu.addItem(item)
         }
 

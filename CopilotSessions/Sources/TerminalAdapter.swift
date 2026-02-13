@@ -130,6 +130,12 @@ class KittyAdapter: TerminalAdapter {
     private let kittyBin = "/Applications/kitty.app/Contents/MacOS/kitty"
 
     func isAvailable() -> Bool {
+        // Kitty is available if the app is installed
+        return FileManager.default.fileExists(atPath: kittyBin)
+    }
+
+    /// Whether kitty remote control is active (socket exists)
+    var isRemoteControlAvailable: Bool {
         return FileManager.default.fileExists(atPath: "/tmp/kitty")
     }
 
