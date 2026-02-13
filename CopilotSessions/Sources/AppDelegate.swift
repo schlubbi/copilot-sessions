@@ -18,10 +18,12 @@ struct CopilotSessionsApp {
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var dataSource = SessionDataSource()
+    private var terminal: TerminalAdapter!
     private var timer: Timer?
     private var sessions: [CopilotSession] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        terminal = detectTerminalAdapter()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem.button {
@@ -115,8 +117,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        menu.addItem(.separator())
-
         let newItem = NSMenuItem(title: "New Session", action: #selector(newSession), keyEquivalent: "n")
         newItem.target = self
         menu.addItem(newItem)
@@ -124,6 +124,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let refreshItem = NSMenuItem(title: "Refresh", action: #selector(doRefresh), keyEquivalent: "r")
         refreshItem.target = self
         menu.addItem(refreshItem)
+
+        let termInfo = NSMenuItem(title: "Terminal: \(terminal.name)", action: nil, keyEquivalent: "")
+        termInfo.isEnabled = false
+        menu.addItem(termInfo)
 
         menu.addItem(.separator())
 
@@ -139,8 +143,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard sender.tag >= 0, sender.tag < active.count else { return }
         let session = active[sender.tag]
 
-        if let pid = session.pid {
-            focusKittyTab(pid: pid)
+        if let tty = session.tty {
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let terminal = self?.terminal else { return }
+                // Try TTY-based focus first; for kitty, try PID-based
+                if let kitty = terminal as? KittyAdapter, let pid = session.pid, let pidInt = Int(pid) {
+                    _ = kitty.focusByPid(pidInt)
+                } else {
+                    _ = terminal.focusTab(tty: "/dev/\(tty)")
+                }
+            }
         }
     }
 
@@ -148,11 +160,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let inactive = Array(sessions.filter { !$0.isActive }.prefix(5))
         guard sender.tag >= 0, sender.tag < inactive.count else { return }
         let session = inactive[sender.tag]
-        resumeInKitty(sessionId: session.id)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            _ = self?.terminal.launch(command: ["copilot", "--resume", session.id],
+                                      title: "copilot: \(session.shortId)")
+        }
     }
 
     @objc private func newSession() {
-        launchInKitty(args: ["copilot"], title: "copilot: new")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            _ = self?.terminal.launch(command: ["copilot"], title: "copilot: new")
+        }
     }
 
     @objc private func doRefresh() {
@@ -167,82 +184,5 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func doQuit() {
         NSApp.terminate(nil)
-    }
-
-    // MARK: - Kitty integration
-
-    private func isKittyRemoteAvailable() -> Bool {
-        return FileManager.default.fileExists(atPath: "/tmp/kitty")
-    }
-
-    private func launchInKitty(args: [String], title: String) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            if self.isKittyRemoteAvailable() {
-                // Kitty running with remote control — open new tab
-                var cmd = ["/Applications/kitty.app/Contents/MacOS/kitty", "@", "launch", "--type=tab", "--title", title]
-                cmd.append(contentsOf: args)
-                _ = self.shell(cmd)
-            } else {
-                // Kitty not running or no socket — launch kitty directly with command
-                var cmd = ["/Applications/kitty.app/Contents/MacOS/kitty", "--title", title]
-                cmd.append(contentsOf: args)
-                _ = self.shell(cmd)
-            }
-            DispatchQueue.main.async {
-                NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
-            }
-        }
-    }
-
-    private func focusKittyTab(pid: String) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            guard self.isKittyRemoteAvailable(),
-                  let data = self.shell(["/Applications/kitty.app/Contents/MacOS/kitty", "@", "ls"]),
-                  let json = try? JSONSerialization.jsonObject(with: Data(data.utf8)) as? [[String: Any]] else {
-                DispatchQueue.main.async {
-                    NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
-                }
-                return
-            }
-
-            let targetPid = Int(pid) ?? 0
-            for osWindow in json {
-                for tab in osWindow["tabs"] as? [[String: Any]] ?? [] {
-                    for window in tab["windows"] as? [[String: Any]] ?? [] {
-                        for fg in window["foreground_processes"] as? [[String: Any]] ?? [] {
-                            if fg["pid"] as? Int == targetPid {
-                                let tabId = tab["id"] as? Int ?? 0
-                                _ = self.shell(["/Applications/kitty.app/Contents/MacOS/kitty", "@", "focus-tab", "--match", "id:\(tabId)"])
-                                DispatchQueue.main.async {
-                                    NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
-                                }
-                                return
-                            }
-                        }
-                    }
-                }
-            }
-
-            DispatchQueue.main.async {
-                NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
-            }
-        }
-    }
-
-    private func resumeInKitty(sessionId: String) {
-        launchInKitty(args: ["copilot", "--resume", sessionId], title: "copilot: \(String(sessionId.prefix(12)))")
-    }
-
-    private func shell(_ args: [String]) -> String? {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: args[0])
-        proc.arguments = Array(args.dropFirst())
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        try? proc.run()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        proc.waitUntilExit()
-        return String(data: data, encoding: .utf8)
     }
 }
