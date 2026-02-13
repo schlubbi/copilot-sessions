@@ -7,18 +7,17 @@ cli:
 
 menubar:
 	cd CopilotSessions && swift build -c release
+	cp CopilotSessions/.build/release/CopilotSessions CopilotSessions.app/Contents/MacOS/CopilotSessions
 
 install: cli menubar
 	@echo "CLI installed to ~/.local/bin/copilot-sessions"
-	@echo "Menu bar app built at CopilotSessions/.build/release/CopilotSessions"
+	@echo "Menu bar app: CopilotSessions.app"
 	@echo ""
-	@echo "To run the menu bar app:"
-	@echo "  ./CopilotSessions/.build/release/CopilotSessions"
-	@echo ""
-	@echo "To run at login, add to System Settings > General > Login Items"
+	@echo "To run:  open CopilotSessions.app"
+	@echo "To run at login: add CopilotSessions.app to System Settings > General > Login Items"
 
 clean:
 	cd CopilotSessions && swift package clean
 
 run-menubar: menubar
-	./CopilotSessions/.build/release/CopilotSessions &
+	open CopilotSessions.app

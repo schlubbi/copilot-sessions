@@ -2,3 +2,4 @@
 .swiftpm/
 *.o
 *.d
+CopilotSessions.app/Contents/MacOS/
