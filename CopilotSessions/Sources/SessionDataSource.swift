@@ -1,4 +1,12 @@
 import Foundation
+import Darwin
+
+/// Session lifecycle status
+enum SessionStatus: String {
+    case working   // actively running tools or using CPU
+    case waiting   // process alive, idle — waiting for user input
+    case done      // no running process
+}
 
 /// Represents the state of a Copilot CLI session
 struct CopilotSession: Identifiable {
@@ -8,12 +16,26 @@ struct CopilotSession: Identifiable {
     let branch: String
     let turns: Int
     let lastTimestamp: Date?
-    let isActive: Bool
+    let status: SessionStatus
     let pid: String?
     let tty: String?
 
+    var isActive: Bool { status != .done }
+
     var statusEmoji: String {
-        isActive ? "🟢" : "⚪"
+        switch status {
+        case .working: return "🟡"
+        case .waiting: return "🟢"
+        case .done:    return "⚪"
+        }
+    }
+
+    var statusLabel: String {
+        switch status {
+        case .working: return "Working"
+        case .waiting: return "Waiting for input"
+        case .done:    return "Done"
+        }
     }
 
     var displayLabel: String {
@@ -37,6 +59,7 @@ class SessionDataSource {
         let pidToSession = getPidToSession()
         let activeSids = Set(pidToSession.values)
         let sessionToPid = Dictionary(pidToSession.map { ($0.value, $0.key) }, uniquingKeysWith: { first, _ in first })
+        let ppidMap = ProcessInspector.buildPpidMap()
 
         var sessions: [CopilotSession] = []
 
@@ -70,12 +93,19 @@ class SessionDataSource {
                 }
             }
 
-            let isActive = activeSids.contains(sid)
+            let isAlive = activeSids.contains(sid)
             let pid = sessionToPid[sid]
             let tty = pid.flatMap { runningPids[$0]?["tty"] }
 
+            let status: SessionStatus
+            if isAlive, let pidStr = pid, let pidInt = Int32(pidStr) {
+                status = ProcessInspector.isWorking(pidInt, ppidMap: ppidMap) ? .working : .waiting
+            } else {
+                status = .done
+            }
+
             // Skip sessions with no data and not active
-            if topic.isEmpty && !isActive { continue }
+            if topic.isEmpty && !isAlive { continue }
 
             sessions.append(CopilotSession(
                 id: sid,
@@ -83,15 +113,18 @@ class SessionDataSource {
                 branch: branch,
                 turns: turns,
                 lastTimestamp: lastTs,
-                isActive: isActive,
+                status: status,
                 pid: pid,
                 tty: tty
             ))
         }
 
-        // Sort: active first, then by timestamp descending
+        // Sort: working first, then waiting, then done, then by timestamp
         sessions.sort { a, b in
-            if a.isActive != b.isActive { return a.isActive }
+            let order: [SessionStatus: Int] = [.working: 0, .waiting: 1, .done: 2]
+            let oa = order[a.status] ?? 2
+            let ob = order[b.status] ?? 2
+            if oa != ob { return oa < ob }
             let ta = a.lastTimestamp ?? .distantPast
             let tb = b.lastTimestamp ?? .distantPast
             return ta > tb
@@ -199,5 +232,74 @@ class SessionDataSource {
         let fmt = ISO8601DateFormatter()
         fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return fmt.date(from: str) ?? ISO8601DateFormatter().date(from: str)
+    }
+}
+
+// MARK: - Native process inspection via Darwin APIs (no shell out)
+
+enum ProcessInspector {
+    /// MCP server process names — these are always-on children, not tool work
+    private static let mcpNames: Set<String> = ["npm", "node", "azmcp"]
+
+    /// Build a map of parent PID → child PIDs for all processes (takes ~1ms)
+    static func buildPpidMap() -> [pid_t: [pid_t]] {
+        var allPids = [pid_t](repeating: 0, count: 8192)
+        let bytes = proc_listpids(UInt32(PROC_ALL_PIDS), 0, &allPids,
+            Int32(MemoryLayout<pid_t>.stride * allPids.count))
+        let count = Int(bytes) / MemoryLayout<pid_t>.stride
+        var map: [pid_t: [pid_t]] = [:]
+        for i in 0..<count {
+            let cpid = allPids[i]
+            guard cpid > 0 else { continue }
+            var bsdInfo = proc_bsdinfo()
+            let ret = proc_pidinfo(cpid, PROC_PIDTBSDINFO, 0, &bsdInfo,
+                Int32(MemoryLayout<proc_bsdinfo>.stride))
+            if ret > 0 {
+                map[pid_t(bsdInfo.pbi_ppid), default: []].append(cpid)
+            }
+        }
+        return map
+    }
+
+    /// Determines if a copilot process is actively working (running tools)
+    static func isWorking(_ pid: pid_t, ppidMap: [pid_t: [pid_t]]) -> Bool {
+        let children = ppidMap[pid] ?? []
+        // Check if any child is a tool process (not MCP infrastructure)
+        let hasToolChild = children.contains { childPid in
+            guard let name = processName(childPid) else { return false }
+            return !mcpNames.contains(name)
+        }
+        if hasToolChild { return true }
+
+        // Fall back to CPU usage — snapshot over 50ms
+        let cpu = cpuUsagePercent(pid, window: 0.05)
+        return cpu > 2.0
+    }
+
+    /// Get the executable base name for a PID via proc_pidpath
+    static func processName(_ pid: pid_t) -> String? {
+        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        let ret = proc_pidpath(pid, &buffer, UInt32(MAXPATHLEN))
+        guard ret > 0 else { return nil }
+        let path = String(cString: buffer)
+        return (path as NSString).lastPathComponent
+    }
+
+    /// Measure CPU usage over a short window using proc_pidinfo
+    static func cpuUsagePercent(_ pid: pid_t, window: TimeInterval = 0.1) -> Double {
+        var info1 = proc_taskinfo()
+        let size = Int32(MemoryLayout<proc_taskinfo>.stride)
+        guard proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &info1, size) > 0 else { return 0 }
+        let t1 = info1.pti_total_user + info1.pti_total_system
+
+        Thread.sleep(forTimeInterval: window)
+
+        var info2 = proc_taskinfo()
+        guard proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &info2, size) > 0 else { return 0 }
+        let t2 = info2.pti_total_user + info2.pti_total_system
+
+        let cpuNs = Double(t2 - t1)
+        let windowNs = window * 1_000_000_000.0
+        return (cpuNs / windowNs) * 100.0
     }
 }

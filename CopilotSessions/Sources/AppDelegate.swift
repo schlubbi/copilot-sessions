@@ -59,7 +59,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func updateIcon() {
         guard let button = statusItem.button else { return }
         let active = sessions.filter { $0.isActive }.count
-        if active > 0 {
+        let working = sessions.filter { $0.status == .working }.count
+        if working > 0 {
+            button.title = "🤖⚡\(active)"
+        } else if active > 0 {
             button.title = "🤖 \(active)"
         } else {
             button.title = "🤖"
@@ -71,46 +74,65 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         menu.removeAllItems()
 
-        let active = sessions.filter { $0.isActive }
-        let inactive = sessions.filter { !$0.isActive }
+        let working = sessions.filter { $0.status == .working }
+        let waiting = sessions.filter { $0.status == .waiting }
+        let done = sessions.filter { $0.status == .done }
 
-        if active.isEmpty && inactive.isEmpty {
+        if working.isEmpty && waiting.isEmpty && done.isEmpty {
             let item = NSMenuItem(title: "No sessions found", action: nil, keyEquivalent: "")
             item.isEnabled = false
             menu.addItem(item)
         }
 
-        // Active sessions
-        if !active.isEmpty {
-            let header = NSMenuItem(title: "Active (\(active.count))", action: nil, keyEquivalent: "")
+        // Working sessions
+        if !working.isEmpty {
+            let header = NSMenuItem(title: "Working (\(working.count))", action: nil, keyEquivalent: "")
             header.isEnabled = false
             menu.addItem(header)
 
-            for (i, session) in active.enumerated() {
+            for session in working {
                 let branch = (session.branch.isEmpty || session.branch == "—") ? "" : "  ⌥ \(session.branch)"
-                let title = "🟢 \(session.displayLabel)\(branch)"
-                let item = NSMenuItem(title: title, action: #selector(handleSession(_:)), keyEquivalent: "")
+                let title = "🟡 \(session.displayLabel)\(branch)"
+                let item = NSMenuItem(title: title, action: #selector(handleActiveSession(_:)), keyEquivalent: "")
                 item.target = self
-                item.tag = i  // index into active array
-                item.toolTip = "PID \(session.pid ?? "?") · \(session.turns) turns · Click to focus"
+                item.tag = tagForSession(session)
+                item.toolTip = "PID \(session.pid ?? "?") · \(session.turns) turns · Working"
                 menu.addItem(item)
             }
         }
 
-        // Inactive sessions (top 5)
-        let inactiveSlice = Array(inactive.prefix(5))
-        if !inactiveSlice.isEmpty {
+        // Waiting sessions
+        if !waiting.isEmpty {
+            if !working.isEmpty { menu.addItem(.separator()) }
+            let header = NSMenuItem(title: "Waiting for input (\(waiting.count))", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+
+            for session in waiting {
+                let branch = (session.branch.isEmpty || session.branch == "—") ? "" : "  ⌥ \(session.branch)"
+                let title = "🟢 \(session.displayLabel)\(branch)"
+                let item = NSMenuItem(title: title, action: #selector(handleActiveSession(_:)), keyEquivalent: "")
+                item.target = self
+                item.tag = tagForSession(session)
+                item.toolTip = "PID \(session.pid ?? "?") · \(session.turns) turns · Waiting for input"
+                menu.addItem(item)
+            }
+        }
+
+        // Done sessions (top 5)
+        let doneSlice = Array(done.prefix(5))
+        if !doneSlice.isEmpty {
             menu.addItem(.separator())
             let header = NSMenuItem(title: "Recent", action: nil, keyEquivalent: "")
             header.isEnabled = false
             menu.addItem(header)
 
-            for (i, session) in inactiveSlice.enumerated() {
+            for session in doneSlice {
                 let title = "⚪ \(session.displayLabel)"
-                let item = NSMenuItem(title: title, action: #selector(handleInactiveSession(_:)), keyEquivalent: "")
+                let item = NSMenuItem(title: title, action: #selector(handleDoneSession(_:)), keyEquivalent: "")
                 item.target = self
-                item.tag = i  // index into inactiveSlice
-                item.toolTip = "Click to resume in new kitty tab"
+                item.tag = tagForSession(session)
+                item.toolTip = "Click to resume in new tab"
                 menu.addItem(item)
             }
         }
@@ -136,17 +158,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(quitItem)
     }
 
+    /// Map session to a stable tag index in the sessions array
+    private func tagForSession(_ session: CopilotSession) -> Int {
+        return sessions.firstIndex(where: { $0.id == session.id }) ?? -1
+    }
+
     // MARK: - Actions
 
-    @objc private func handleSession(_ sender: NSMenuItem) {
-        let active = sessions.filter { $0.isActive }
-        guard sender.tag >= 0, sender.tag < active.count else { return }
-        let session = active[sender.tag]
+    @objc private func handleActiveSession(_ sender: NSMenuItem) {
+        guard sender.tag >= 0, sender.tag < sessions.count else { return }
+        let session = sessions[sender.tag]
+        guard session.isActive else { return }
 
         if let tty = session.tty {
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let terminal = self?.terminal else { return }
-                // Try TTY-based focus first; for kitty, try PID-based
                 if let kitty = terminal as? KittyAdapter, let pid = session.pid, let pidInt = Int(pid) {
                     _ = kitty.focusByPid(pidInt)
                 } else {
@@ -156,10 +182,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func handleInactiveSession(_ sender: NSMenuItem) {
-        let inactive = Array(sessions.filter { !$0.isActive }.prefix(5))
-        guard sender.tag >= 0, sender.tag < inactive.count else { return }
-        let session = inactive[sender.tag]
+    @objc private func handleDoneSession(_ sender: NSMenuItem) {
+        guard sender.tag >= 0, sender.tag < sessions.count else { return }
+        let session = sessions[sender.tag]
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             _ = self?.terminal.launch(command: ["copilot", "--resume", session.id],
                                       title: "copilot: \(session.shortId)")
