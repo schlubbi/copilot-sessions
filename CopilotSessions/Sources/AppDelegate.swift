@@ -23,7 +23,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var sessions: [CopilotSession] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        terminal = detectTerminalAdapter()
+        terminal = preferredTerminalAdapter()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem.button {
@@ -147,9 +147,41 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshItem.target = self
         menu.addItem(refreshItem)
 
-        let termInfo = NSMenuItem(title: "Terminal: \(terminal.name)", action: nil, keyEquivalent: "")
-        termInfo.isEnabled = false
-        menu.addItem(termInfo)
+        // Settings submenu
+        let settingsItem = NSMenuItem(title: "Settings", action: nil, keyEquivalent: "")
+        let settingsMenu = NSMenu()
+
+        // Terminal picker
+        let termHeader = NSMenuItem(title: "New sessions open in:", action: nil, keyEquivalent: "")
+        termHeader.isEnabled = false
+        settingsMenu.addItem(termHeader)
+
+        let autoItem = NSMenuItem(title: "Auto-detect", action: #selector(selectTerminal(_:)), keyEquivalent: "")
+        autoItem.target = self
+        autoItem.tag = -1
+        if UserDefaults.standard.string(forKey: "terminalAdapter") == nil {
+            autoItem.state = .on
+        }
+        settingsMenu.addItem(autoItem)
+
+        settingsMenu.addItem(.separator())
+
+        for (i, adapter) in allTerminalAdapters.enumerated() {
+            let available = adapter.isAvailable()
+            let title = "\(adapter.icon) \(adapter.name)\(available ? "" : " (not found)")"
+            let item = NSMenuItem(title: title, action: available ? #selector(selectTerminal(_:)) : nil, keyEquivalent: "")
+            item.target = self
+            item.tag = i
+            if adapter.key == terminal.key,
+               UserDefaults.standard.string(forKey: "terminalAdapter") != nil {
+                item.state = .on
+            }
+            if !available { item.isEnabled = false }
+            settingsMenu.addItem(item)
+        }
+
+        settingsItem.submenu = settingsMenu
+        menu.addItem(settingsItem)
 
         menu.addItem(.separator())
 
@@ -194,6 +226,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func newSession() {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             _ = self?.terminal.launch(command: ["copilot"], title: "copilot: new")
+        }
+    }
+
+    @objc private func selectTerminal(_ sender: NSMenuItem) {
+        if sender.tag == -1 {
+            // Auto-detect
+            UserDefaults.standard.removeObject(forKey: "terminalAdapter")
+            terminal = detectTerminalAdapter()
+        } else if sender.tag >= 0, sender.tag < allTerminalAdapters.count {
+            let adapter = allTerminalAdapters[sender.tag]
+            UserDefaults.standard.set(adapter.key, forKey: "terminalAdapter")
+            terminal = adapter
         }
     }
 

@@ -3,8 +3,14 @@ import AppKit
 
 /// Protocol for terminal emulator adapters
 protocol TerminalAdapter {
+    /// Unique key for persistence (e.g. "terminal", "kitty", "iterm2")
+    var key: String { get }
+
     /// Display name for this terminal
     var name: String { get }
+
+    /// Emoji icon for this terminal
+    var icon: String { get }
 
     /// Whether this terminal is currently available (installed + running or launchable)
     func isAvailable() -> Bool
@@ -16,20 +22,35 @@ protocol TerminalAdapter {
     func launch(command: [String], title: String) -> Bool
 }
 
+/// All known terminal adapters
+let allTerminalAdapters: [TerminalAdapter] = [
+    AppleTerminalAdapter(),
+    KittyAdapter(),
+    ITermAdapter(),
+]
+
+/// Returns the user's preferred terminal, or auto-detects
+func preferredTerminalAdapter() -> TerminalAdapter {
+    if let saved = UserDefaults.standard.string(forKey: "terminalAdapter"),
+       let match = allTerminalAdapters.first(where: { $0.key == saved && $0.isAvailable() }) {
+        return match
+    }
+    return detectTerminalAdapter()
+}
+
 /// Detects and returns the best available terminal adapter
 func detectTerminalAdapter() -> TerminalAdapter {
-    // Prefer kitty if running with remote control
     let kitty = KittyAdapter()
     if kitty.isAvailable() { return kitty }
-
-    // Fallback to Apple Terminal (always available on macOS)
     return AppleTerminalAdapter()
 }
 
 // MARK: - Apple Terminal
 
 class AppleTerminalAdapter: TerminalAdapter {
+    let key = "terminal"
     let name = "Terminal"
+    let icon = "🖥️"
 
     func isAvailable() -> Bool {
         return true // Always present on macOS
@@ -103,7 +124,9 @@ class AppleTerminalAdapter: TerminalAdapter {
 // MARK: - Kitty
 
 class KittyAdapter: TerminalAdapter {
+    let key = "kitty"
     let name = "kitty"
+    let icon = "🐱"
     private let kittyBin = "/Applications/kitty.app/Contents/MacOS/kitty"
 
     func isAvailable() -> Bool {
@@ -181,7 +204,9 @@ class KittyAdapter: TerminalAdapter {
 // MARK: - iTerm2 (stub for future)
 
 class ITermAdapter: TerminalAdapter {
+    let key = "iterm2"
     let name = "iTerm2"
+    let icon = "🔲"
 
     func isAvailable() -> Bool {
         return NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.googlecode.iterm2") != nil
