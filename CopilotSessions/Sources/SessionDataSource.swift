@@ -103,7 +103,7 @@ class SessionDataSource {
     // MARK: - Process discovery
 
     private func getRunningCopilotPids() -> [String: [String: String]] {
-        guard let output = shell("ps", "-eo", "pid,tty,lstart,command") else { return [:] }
+        guard let output = shell("/bin/ps", "-eo", "pid,tty,lstart,command") else { return [:] }
         var result: [String: [String: String]] = [:]
         for line in output.components(separatedBy: "\n") {
             if line.contains("copilot-darwin") && !line.contains("grep") {
@@ -119,7 +119,7 @@ class SessionDataSource {
     }
 
     private func getPidToSession() -> [String: String] {
-        guard let output = shell("lsof", "-c", "copilot") else { return [:] }
+        guard let output = shell("/usr/sbin/lsof", "-c", "copilot") else { return [:] }
         var result: [String: String] = [:]
         for line in output.components(separatedBy: "\n") {
             if line.contains("session-state") && line.contains("session.db") {
@@ -183,8 +183,8 @@ class SessionDataSource {
 
     private func shell(_ args: String...) -> String? {
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        proc.arguments = args
+        proc.executableURL = URL(fileURLWithPath: args[0])
+        proc.arguments = Array(args.dropFirst())
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice

@@ -163,7 +163,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func focusKittyTab(pid: String) {
         DispatchQueue.global(qos: .userInitiated).async {
-            guard let data = self.shell("/usr/bin/env", "kitty", "@", "ls"),
+            guard let data = self.shell("/Applications/kitty.app/Contents/MacOS/kitty", "@", "ls"),
                   let json = try? JSONSerialization.jsonObject(with: Data(data.utf8)) as? [[String: Any]] else {
                 DispatchQueue.main.async {
                     NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
@@ -178,7 +178,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         for fg in window["foreground_processes"] as? [[String: Any]] ?? [] {
                             if fg["pid"] as? Int == targetPid {
                                 let tabId = tab["id"] as? Int ?? 0
-                                _ = self.shell("/usr/bin/env", "kitty", "@", "focus-tab", "--match", "id:\(tabId)")
+                                _ = self.shell("/Applications/kitty.app/Contents/MacOS/kitty", "@", "focus-tab", "--match", "id:\(tabId)")
                                 DispatchQueue.main.async {
                                     NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
                                 }
@@ -197,7 +197,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func resumeInKitty(sessionId: String) {
         DispatchQueue.global(qos: .userInitiated).async {
-            _ = self.shell("/usr/bin/env", "kitty", "@", "launch", "--type=tab",
+            _ = self.shell("/Applications/kitty.app/Contents/MacOS/kitty", "@", "launch", "--type=tab",
                            "--title", "copilot: \(String(sessionId.prefix(12)))",
                            "copilot", "--resume", sessionId)
             DispatchQueue.main.async {
