@@ -115,6 +115,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
 
+        menu.addItem(.separator())
+
+        let newItem = NSMenuItem(title: "New Session", action: #selector(newSession), keyEquivalent: "n")
+        newItem.target = self
+        menu.addItem(newItem)
+
         let refreshItem = NSMenuItem(title: "Refresh", action: #selector(doRefresh), keyEquivalent: "r")
         refreshItem.target = self
         menu.addItem(refreshItem)
@@ -143,6 +149,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard sender.tag >= 0, sender.tag < inactive.count else { return }
         let session = inactive[sender.tag]
         resumeInKitty(sessionId: session.id)
+    }
+
+    @objc private func newSession() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = self.shell("/Applications/kitty.app/Contents/MacOS/kitty", "@", "launch", "--type=tab",
+                           "--title", "copilot: new", "copilot")
+            DispatchQueue.main.async {
+                NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
+            }
+        }
     }
 
     @objc private func doRefresh() {
