@@ -92,11 +92,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
             for session in working {
                 let branch = (session.branch.isEmpty || session.branch == "—") ? "" : "  ⌥ \(session.branch)"
-                let title = "🟡 \(session.displayLabel)\(branch)"
+                let title = "🟡 \(session.terminalType.icon) \(session.displayLabel)\(branch)"
                 let item = NSMenuItem(title: title, action: #selector(handleActiveSession(_:)), keyEquivalent: "")
                 item.target = self
                 item.tag = tagForSession(session)
-                item.toolTip = "PID \(session.pid ?? "?") · \(session.turns) turns · Working"
+                item.toolTip = "PID \(session.pid ?? "?") · \(session.turns) turns · Working · \(session.terminalType.rawValue)"
                 menu.addItem(item)
             }
         }
@@ -110,11 +110,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
             for session in waiting {
                 let branch = (session.branch.isEmpty || session.branch == "—") ? "" : "  ⌥ \(session.branch)"
-                let title = "🟢 \(session.displayLabel)\(branch)"
+                let title = "🟢 \(session.terminalType.icon) \(session.displayLabel)\(branch)"
                 let item = NSMenuItem(title: title, action: #selector(handleActiveSession(_:)), keyEquivalent: "")
                 item.target = self
                 item.tag = tagForSession(session)
-                item.toolTip = "PID \(session.pid ?? "?") · \(session.turns) turns · Waiting for input"
+                item.toolTip = "PID \(session.pid ?? "?") · \(session.turns) turns · Waiting for input · \(session.terminalType.rawValue)"
                 menu.addItem(item)
             }
         }

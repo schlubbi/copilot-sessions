@@ -8,6 +8,29 @@ enum SessionStatus: String {
     case done      // no running process
 }
 
+/// Known terminal emulators with display info
+enum TerminalType: String {
+    case terminal = "Terminal"
+    case kitty    = "kitty"
+    case iterm2   = "iTerm2"
+    case wezterm  = "WezTerm"
+    case alacritty = "Alacritty"
+    case ghostty  = "Ghostty"
+    case unknown  = "?"
+
+    var icon: String {
+        switch self {
+        case .terminal:  return "🖥️"
+        case .kitty:     return "🐱"
+        case .iterm2:    return "🔲"
+        case .wezterm:   return "🌐"
+        case .alacritty: return "⬛"
+        case .ghostty:   return "👻"
+        case .unknown:   return "💻"
+        }
+    }
+}
+
 /// Represents the state of a Copilot CLI session
 struct CopilotSession: Identifiable {
     let id: String           // full session UUID
@@ -19,6 +42,7 @@ struct CopilotSession: Identifiable {
     let status: SessionStatus
     let pid: String?
     let tty: String?
+    let terminalType: TerminalType
 
     var isActive: Bool { status != .done }
 
@@ -98,10 +122,13 @@ class SessionDataSource {
             let tty = pid.flatMap { runningPids[$0]?["tty"] }
 
             let status: SessionStatus
+            let termType: TerminalType
             if isAlive, let pidStr = pid, let pidInt = Int32(pidStr) {
                 status = ProcessInspector.isWorking(pidInt, ppidMap: ppidMap) ? .working : .waiting
+                termType = ProcessInspector.detectTerminal(pidInt)
             } else {
                 status = .done
+                termType = .unknown
             }
 
             // Skip sessions with no data and not active
@@ -115,7 +142,8 @@ class SessionDataSource {
                 lastTimestamp: lastTs,
                 status: status,
                 pid: pid,
-                tty: tty
+                tty: tty,
+                terminalType: termType
             ))
         }
 
@@ -301,5 +329,46 @@ enum ProcessInspector {
         let cpuNs = Double(t2 - t1)
         let windowNs = window * 1_000_000_000.0
         return (cpuNs / windowNs) * 100.0
+    }
+
+    /// Detect which terminal emulator a copilot process is running in
+    /// by walking the PPID chain via sysctl (works through root-owned login)
+    static func detectTerminal(_ pid: pid_t) -> TerminalType {
+        let terminalPatterns: [(String, TerminalType)] = [
+            ("Terminal.app", .terminal),
+            ("kitty.app", .kitty),
+            ("iTerm2.app", .iterm2),
+            ("WezTerm.app", .wezterm),
+            ("Alacritty.app", .alacritty),
+            ("Ghostty.app", .ghostty),
+        ]
+
+        var current = pid
+        for _ in 0..<15 {
+            if let path = processPath(current) {
+                for (pattern, termType) in terminalPatterns {
+                    if path.contains(pattern) { return termType }
+                }
+            }
+            guard let ppid = parentViaSysctl(current), ppid > 0, ppid != current else { break }
+            current = ppid
+        }
+        return .unknown
+    }
+
+    /// Full executable path for a PID
+    private static func processPath(_ pid: pid_t) -> String? {
+        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        guard proc_pidpath(pid, &buffer, UInt32(MAXPATHLEN)) > 0 else { return nil }
+        return String(cString: buffer)
+    }
+
+    /// Get parent PID via sysctl (works for any process, including root-owned)
+    private static func parentViaSysctl(_ pid: pid_t) -> pid_t? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0 else { return nil }
+        return info.kp_eproc.e_ppid
     }
 }
