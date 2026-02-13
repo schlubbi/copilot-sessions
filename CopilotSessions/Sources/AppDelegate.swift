@@ -214,7 +214,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
         try? proc.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
         proc.waitUntilExit()
-        return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
+        return String(data: data, encoding: .utf8)
     }
 }

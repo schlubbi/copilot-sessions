@@ -189,8 +189,9 @@ class SessionDataSource {
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
         try? proc.run()
-        proc.waitUntilExit()
+        // Read BEFORE waitUntilExit to avoid pipe buffer deadlock
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
         return String(data: data, encoding: .utf8)
     }
 
