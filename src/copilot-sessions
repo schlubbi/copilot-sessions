@@ -1,0 +1,444 @@
+#!/usr/bin/env python3
+"""
+copilot-sessions — Dashboard and manager for GitHub Copilot CLI sessions.
+
+Usage:
+  copilot-sessions              Show active sessions
+  copilot-sessions --all        Include recent inactive sessions
+  copilot-sessions --pick       Interactive session picker (focus or resume)
+  copilot-sessions --focus SID  Focus the kitty tab for session SID
+  copilot-sessions --resume SID Resume session SID in a new kitty tab
+"""
+
+import json
+import os
+import glob
+import re
+import subprocess
+import sys
+from datetime import datetime
+
+
+# ─── Session data layer ───────────────────────────────────────────────────────
+
+
+def get_running_copilot_pids():
+    """Return dict of PID -> {tty, lstart} for running copilot processes."""
+    try:
+        out = subprocess.check_output(["ps", "-eo", "pid,tty,lstart,command"], text=True)
+    except subprocess.CalledProcessError:
+        return {}
+    running = {}
+    for line in out.splitlines():
+        if "copilot-darwin" in line and "grep" not in line:
+            parts = line.split()
+            pid = parts[0]
+            tty = parts[1]
+            lstart = " ".join(parts[2:7])
+            running[pid] = {"tty": tty, "lstart": lstart}
+    return running
+
+
+def get_pid_to_session():
+    """Map PID -> session_id via lsof (open session.db files)."""
+    try:
+        out = subprocess.check_output(
+            ["lsof", "-c", "copilot"], text=True, stderr=subprocess.DEVNULL
+        )
+    except subprocess.CalledProcessError:
+        return {}
+    mapping = {}
+    for line in out.splitlines():
+        if "session-state" in line and "session.db" in line:
+            parts = line.split()
+            pid = parts[1]
+            m = re.search(r"session-state/([a-f0-9-]+)/", line)
+            if m:
+                mapping[pid] = m.group(1)
+    return mapping
+
+
+def _extract_topic(msg):
+    """Extract a short, readable topic from the first user message."""
+    line = msg.split("\n")[0].strip()
+    # Strip URLs and path fragments
+    line = re.sub(r"https?://\S+\s*,?\s*", "", line).strip()
+    line = re.sub(r"\.\./\S+\s*", "", line).strip()
+    line = re.sub(r"^/\S+\s*", "", line).strip()
+    # Strip filler prefixes (repeated)
+    for _ in range(3):
+        line = re.sub(
+            r"^(I want to |I'd like to |Can you |Could you |Please |Let's |We need to |"
+            r"Read |Take a look at |Go through |Given |Looking at |You're a |"
+            r"At github |I made |I have |I need |Help me |Show me |Find |Identify |Research |"
+            r"Change |Create |Build |Write |Run |Check |and |the |that |this )",
+            "",
+            line,
+            flags=re.IGNORECASE,
+        ).strip()
+    line = re.sub(r"^[,\.\s:;?\-()]+", "", line).strip()
+    if line:
+        line = line[0].upper() + line[1:]
+    if len(line) > 35:
+        cut = line[:35].rsplit(" ", 1)[0]
+        line = cut + "…"
+    return line
+
+
+def load_session_snapshots():
+    """Load snapshot metadata for all sessions."""
+    base = os.path.expanduser("~/.copilot/session-state")
+    sessions = {}
+    for session_dir in glob.glob(f"{base}/*/"):
+        sid = os.path.basename(session_dir.rstrip("/"))
+        idx = os.path.join(session_dir, "rewind-snapshots", "index.json")
+        if not os.path.exists(idx):
+            sessions[sid] = {"topic": "", "branch": "", "last_ts": "", "turns": 0}
+            continue
+        try:
+            with open(idx) as f:
+                data = json.load(f)
+            snaps = data.get("snapshots", [])
+            if snaps:
+                topic = _extract_topic(snaps[0].get("userMessage", ""))
+                last_snap = snaps[-1]
+                sessions[sid] = {
+                    "topic": topic,
+                    "branch": last_snap.get("gitBranch", ""),
+                    "last_ts": last_snap.get("timestamp", ""),
+                    "turns": len(snaps),
+                }
+            else:
+                sessions[sid] = {"topic": "", "branch": "", "last_ts": "", "turns": 0}
+        except Exception:
+            sessions[sid] = {"topic": "", "branch": "", "last_ts": "", "turns": 0}
+    return sessions
+
+
+# ─── Display helpers ──────────────────────────────────────────────────────────
+
+
+def format_age(lstart_str):
+    """Convert ps lstart string (local time) to a human-readable age."""
+    try:
+        dt = datetime.strptime(lstart_str, "%a %b %d %H:%M:%S %Y")
+        delta = datetime.now() - dt
+        secs = delta.total_seconds()
+        if secs < 0:
+            return "<1m"
+        mins = secs / 60
+        if mins < 60:
+            return f"{int(mins)}m"
+        hours = mins / 60
+        if hours < 24:
+            return f"{int(hours)}h"
+        return f"{int(hours / 24)}d"
+    except Exception:
+        return "?"
+
+
+def truncate(s, width):
+    if len(s) <= width:
+        return s
+    return s[: width - 1] + "…"
+
+
+def build_session_rows():
+    """Build enriched session rows combining ps, lsof, and snapshot data."""
+    running = get_running_copilot_pids()
+    pid_session = get_pid_to_session()
+    snapshots = load_session_snapshots()
+
+    # Reverse map: session_id -> pid
+    session_to_pid = {v: k for k, v in pid_session.items()}
+
+    rows = []
+    for pid, info in running.items():
+        sid = pid_session.get(pid, "")
+        snap = snapshots.get(sid, {})
+        rows.append(
+            {
+                "pid": pid,
+                "tty": info["tty"],
+                "session": sid,
+                "session_short": sid[:12] if sid else "—",
+                "branch": snap.get("branch", "") or "—",
+                "age": format_age(info["lstart"]),
+                "turns": str(snap.get("turns", 0)) if snap.get("turns") else "—",
+                "topic": snap.get("topic") or "(no snapshot data)",
+                "active": True,
+            }
+        )
+
+    # Add inactive sessions (have snapshots but no running process)
+    active_sids = set(pid_session.values())
+    for sid, snap in snapshots.items():
+        if sid not in active_sids and snap.get("topic"):
+            rows.append(
+                {
+                    "pid": "",
+                    "tty": "",
+                    "session": sid,
+                    "session_short": sid[:12],
+                    "branch": snap.get("branch", "") or "—",
+                    "age": "",
+                    "turns": str(snap.get("turns", 0)) if snap.get("turns") else "—",
+                    "topic": snap.get("topic", "?"),
+                    "active": False,
+                    "last_ts": snap.get("last_ts", ""),
+                }
+            )
+
+    rows.sort(key=lambda r: (not r["active"], r.get("tty", ""), r.get("last_ts", "")))
+    return rows, session_to_pid
+
+
+# ─── Kitty integration ───────────────────────────────────────────────────────
+
+
+def kitty_list_windows():
+    """Get all kitty windows with their PIDs and titles."""
+    try:
+        out = subprocess.check_output(["kitty", "@", "ls"], text=True, stderr=subprocess.DEVNULL)
+        return json.loads(out)
+    except (subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def kitty_find_tab_by_pid(target_pid):
+    """Find the kitty tab containing a process with the given PID."""
+    windows = kitty_list_windows()
+    target_pid = int(target_pid)
+    for os_window in windows:
+        for tab in os_window.get("tabs", []):
+            for window in tab.get("windows", []):
+                # Check foreground processes and the shell PID
+                fg = window.get("foreground_processes", [])
+                for proc in fg:
+                    if proc.get("pid") == target_pid:
+                        return tab["id"], os_window["id"]
+                    # Check child PIDs
+                    for cmd_pid in proc.get("cmdline_pid", []):
+                        if cmd_pid == target_pid:
+                            return tab["id"], os_window["id"]
+    return None, None
+
+
+def kitty_focus_tab(tab_id, os_window_id=None):
+    """Focus a kitty tab by ID."""
+    try:
+        subprocess.run(
+            ["kitty", "@", "focus-tab", "--match", f"id:{tab_id}"],
+            check=True,
+            capture_output=True,
+        )
+        # Also bring kitty to front
+        subprocess.run(
+            ["open", "-a", "kitty"],
+            check=True,
+            capture_output=True,
+        )
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def kitty_open_resume(session_id, cwd=None):
+    """Open a new kitty tab and resume a copilot session."""
+    cmd = ["kitty", "@", "launch", "--type=tab", "--title", f"copilot: {session_id[:12]}"]
+    if cwd:
+        cmd.extend(["--cwd", cwd])
+    cmd.extend(["copilot", "--resume", session_id])
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+        subprocess.run(["open", "-a", "kitty"], check=True, capture_output=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"  ❌ Failed to open kitty tab: {e}", file=sys.stderr)
+        return False
+
+
+def focus_session(session_id, rows, session_to_pid):
+    """Focus or resume a session."""
+    # Find the row
+    row = None
+    for r in rows:
+        if r["session"].startswith(session_id):
+            row = r
+            break
+
+    if not row:
+        print(f"  ❌ Session {session_id} not found")
+        return False
+
+    if row["active"] and row["pid"]:
+        # Try to focus existing kitty tab
+        tab_id, os_win_id = kitty_find_tab_by_pid(row["pid"])
+        if tab_id:
+            if kitty_focus_tab(tab_id, os_win_id):
+                print(f"  ✅ Focused tab for session {row['session_short']} (PID {row['pid']})")
+                return True
+            else:
+                print(f"  ❌ Found tab but couldn't focus it")
+                return False
+        else:
+            print(f"  ⚠️  Session is running (PID {row['pid']}) but not in a kitty tab")
+            return False
+    else:
+        # Resume inactive session in new kitty tab
+        print(f"  🔄 Resuming session {row['session_short']} in new kitty tab...")
+        return kitty_open_resume(row["session"])
+
+
+# ─── Interactive picker ───────────────────────────────────────────────────────
+
+
+def interactive_pick(rows, session_to_pid):
+    """Interactive session picker using simple stdin."""
+    # Filter to sessions with data
+    pickable = [r for r in rows if r["session"]]
+    if not pickable:
+        print("  No sessions with data found.")
+        return
+
+    print(f"\n  {'#':<4} {'Status':<8} {'Session':<13} {'Branch':<20} {'Topic'}")
+    print(f"  {'─'*3} {'─'*7} {'─'*12} {'─'*19} {'─'*35}")
+
+    for i, r in enumerate(pickable):
+        status = "🟢 run" if r["active"] else "⚪ idle"
+        print(
+            f"  {i+1:<4} {status:<8} {r['session_short']:<13}"
+            f" {truncate(r['branch'], 20):<20} {r['topic']}"
+        )
+
+    print()
+    try:
+        choice = input("  Enter # to focus/resume (q to quit): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+
+    if choice.lower() == "q":
+        return
+
+    try:
+        idx = int(choice) - 1
+        if 0 <= idx < len(pickable):
+            focus_session(pickable[idx]["session"], rows, session_to_pid)
+        else:
+            print("  Invalid selection")
+    except ValueError:
+        # Try as session ID prefix
+        focus_session(choice, rows, session_to_pid)
+
+
+# ─── Display ──────────────────────────────────────────────────────────────────
+
+
+def display_dashboard(show_all=False):
+    """Print the session dashboard."""
+    rows, session_to_pid = build_session_rows()
+
+    active_rows = [r for r in rows if r["active"]]
+    inactive_rows = [r for r in rows if not r["active"]]
+    matched = sum(1 for r in active_rows if r["session"])
+
+    try:
+        term_width = os.get_terminal_size().columns
+    except Exception:
+        term_width = 120
+
+    branch_width = 22
+    topic_width = max(20, min(40, term_width - 8 - 10 - 14 - 6 - 7 - branch_width - 4))
+
+    # Header
+    print(f"\n  🤖 Copilot CLI Sessions — {len(active_rows)} active", end="")
+    if len(active_rows) != matched:
+        print(f" ({matched} with session data)", end="")
+    print("\n")
+
+    hdr = (
+        f"  {'PID':<7} {'TTY':<9} {'Session':<13} {'Age':>5} {'#':>3}"
+        f"  {'Branch':<{branch_width}} {'Topic'}"
+    )
+    print(hdr)
+    sep = (
+        f"  {'─'*6}  {'─'*8} {'─'*12} {'─'*5} {'─'*3}"
+        f"  {'─'*branch_width} {'─'*min(topic_width, 40)}"
+    )
+    print(sep)
+
+    for r in active_rows:
+        line = (
+            f"  {r['pid']:<7} {r['tty']:<9} {r['session_short']:<13} {r['age']:>5} {r['turns']:>3}"
+            f"  {truncate(r['branch'], branch_width):<{branch_width}}"
+            f" {truncate(r['topic'], topic_width)}"
+        )
+        print(line)
+
+    print()
+
+    if show_all and inactive_rows:
+        # Sort inactive by last_ts descending
+        inactive_rows.sort(key=lambda r: r.get("last_ts", ""), reverse=True)
+        print(f"  📋 Recent inactive sessions (showing last 10)\n")
+        print(f"  {'Session':<13} {'Last Active':<18} {'Topic'}")
+        print(f"  {'─'*12} {'─'*17} {'─'*min(topic_width, 40)}")
+        for r in inactive_rows[:10]:
+            ts = r.get("last_ts", "")
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                ts_fmt = dt.strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                ts_fmt = "?"
+            print(
+                f"  {r['session_short']:<13} {ts_fmt:<18}"
+                f" {truncate(r['topic'], topic_width)}"
+            )
+        print()
+
+    return rows, session_to_pid
+
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+
+def main():
+    args = sys.argv[1:]
+
+    if "--help" in args or "-h" in args:
+        print(__doc__)
+        return
+
+    show_all = "--all" in args or "-a" in args
+
+    # Direct focus mode
+    if "--focus" in args:
+        idx = args.index("--focus")
+        if idx + 1 < len(args):
+            rows, s2p = build_session_rows()
+            focus_session(args[idx + 1], rows, s2p)
+            return
+        print("  Usage: copilot-sessions --focus <session-id-prefix>")
+        return
+
+    # Direct resume mode
+    if "--resume" in args:
+        idx = args.index("--resume")
+        if idx + 1 < len(args):
+            sid = args[idx + 1]
+            kitty_open_resume(sid)
+            return
+        print("  Usage: copilot-sessions --resume <session-id>")
+        return
+
+    # Display dashboard
+    rows, session_to_pid = display_dashboard(show_all=show_all)
+
+    # Interactive pick mode
+    if "--pick" in args or "-p" in args:
+        interactive_pick(rows, session_to_pid)
+
+
+if __name__ == "__main__":
+    main()
