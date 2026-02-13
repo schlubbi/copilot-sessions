@@ -152,13 +152,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func newSession() {
-        DispatchQueue.global(qos: .userInitiated).async {
-            _ = self.shell("/Applications/kitty.app/Contents/MacOS/kitty", "@", "launch", "--type=tab",
-                           "--title", "copilot: new", "copilot")
-            DispatchQueue.main.async {
-                NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
-            }
-        }
+        launchInKitty(args: ["copilot"], title: "copilot: new")
     }
 
     @objc private func doRefresh() {
@@ -177,9 +171,33 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Kitty integration
 
+    private func isKittyRemoteAvailable() -> Bool {
+        return FileManager.default.fileExists(atPath: "/tmp/kitty")
+    }
+
+    private func launchInKitty(args: [String], title: String) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            if self.isKittyRemoteAvailable() {
+                // Kitty running with remote control — open new tab
+                var cmd = ["/Applications/kitty.app/Contents/MacOS/kitty", "@", "launch", "--type=tab", "--title", title]
+                cmd.append(contentsOf: args)
+                _ = self.shell(cmd)
+            } else {
+                // Kitty not running or no socket — launch kitty directly with command
+                var cmd = ["/Applications/kitty.app/Contents/MacOS/kitty", "--title", title]
+                cmd.append(contentsOf: args)
+                _ = self.shell(cmd)
+            }
+            DispatchQueue.main.async {
+                NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
+            }
+        }
+    }
+
     private func focusKittyTab(pid: String) {
         DispatchQueue.global(qos: .userInitiated).async {
-            guard let data = self.shell("/Applications/kitty.app/Contents/MacOS/kitty", "@", "ls"),
+            guard self.isKittyRemoteAvailable(),
+                  let data = self.shell(["/Applications/kitty.app/Contents/MacOS/kitty", "@", "ls"]),
                   let json = try? JSONSerialization.jsonObject(with: Data(data.utf8)) as? [[String: Any]] else {
                 DispatchQueue.main.async {
                     NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
@@ -194,7 +212,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         for fg in window["foreground_processes"] as? [[String: Any]] ?? [] {
                             if fg["pid"] as? Int == targetPid {
                                 let tabId = tab["id"] as? Int ?? 0
-                                _ = self.shell("/Applications/kitty.app/Contents/MacOS/kitty", "@", "focus-tab", "--match", "id:\(tabId)")
+                                _ = self.shell(["/Applications/kitty.app/Contents/MacOS/kitty", "@", "focus-tab", "--match", "id:\(tabId)"])
                                 DispatchQueue.main.async {
                                     NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
                                 }
@@ -212,17 +230,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func resumeInKitty(sessionId: String) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            _ = self.shell("/Applications/kitty.app/Contents/MacOS/kitty", "@", "launch", "--type=tab",
-                           "--title", "copilot: \(String(sessionId.prefix(12)))",
-                           "copilot", "--resume", sessionId)
-            DispatchQueue.main.async {
-                NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
-            }
-        }
+        launchInKitty(args: ["copilot", "--resume", sessionId], title: "copilot: \(String(sessionId.prefix(12)))")
     }
 
-    private func shell(_ args: String...) -> String? {
+    private func shell(_ args: [String]) -> String? {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: args[0])
         proc.arguments = Array(args.dropFirst())
