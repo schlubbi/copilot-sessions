@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import CopilotSessionsLib
+import Carbon.HIToolbox
 
 // Keep delegate alive for the lifetime of the app
 private var appDelegate: AppDelegate!
@@ -22,6 +23,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var terminal: TerminalAdapter!
     private var timer: Timer?
     private var sessions: [CopilotSession] = []
+    private let labelStore = LabelStore()
+    private var hotKeyRef: EventHotKeyRef?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         terminal = preferredTerminalAdapter()
@@ -35,6 +38,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
+
+        // Register global hotkey ⌥⇧C
+        registerGlobalHotkey()
 
         // Load sessions in background after launch
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -70,6 +76,32 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    // MARK: - Global Hotkey (⌥⇧C)
+
+    private func registerGlobalHotkey() {
+        var hotKeyID = EventHotKeyID()
+        hotKeyID.signature = OSType(0x4350534D) // "CPSM"
+        hotKeyID.id = 1
+
+        // ⌥⇧C  — modifier: optionKey(0x0800) + shiftKey(0x0200), keycode 8 = 'C'
+        let modifiers: UInt32 = UInt32(optionKey | shiftKey)
+        let status = RegisterEventHotKey(UInt32(kVK_ANSI_C), modifiers, hotKeyID,
+                                          GetApplicationEventTarget(), 0, &hotKeyRef)
+        if status == noErr {
+            // Install Carbon event handler
+            var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                                          eventKind: UInt32(kEventHotKeyPressed))
+            InstallEventHandler(GetApplicationEventTarget(), { _, event, userData -> OSStatus in
+                guard let userData = userData else { return OSStatus(eventNotHandledErr) }
+                let delegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
+                DispatchQueue.main.async {
+                    delegate.statusItem.button?.performClick(nil)
+                }
+                return noErr
+            }, 1, &eventType, Unmanaged.passUnretained(self).toOpaque(), nil)
+        }
+    }
+
     // MARK: - NSMenuDelegate — rebuild menu each time it opens
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -85,55 +117,72 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(item)
         }
 
-        // Working sessions
-        if !working.isEmpty {
-            let header = NSMenuItem(title: "Working (\(working.count))", action: nil, keyEquivalent: "")
-            header.isEnabled = false
-            menu.addItem(header)
-
-            for session in working {
-                let branch = (session.branch.isEmpty || session.branch == "—") ? "" : "  ⌥ \(session.branch)"
-                let title = "🟡 \(session.terminalType.icon) \(session.displayLabel)\(branch)"
-                let item = NSMenuItem(title: title, action: #selector(handleActiveSession(_:)), keyEquivalent: "")
-                item.target = self
-                item.tag = tagForSession(session)
-                item.toolTip = session.fullMessage.isEmpty ? session.shortId : session.fullMessage
-                menu.addItem(item)
-            }
+        // Group active sessions by repository
+        let activeSessions = working + waiting
+        let grouped = Dictionary(grouping: activeSessions) { $0.displayRepoName.isEmpty ? "Other" : $0.displayRepoName }
+        let sortedGroups = grouped.sorted { a, b in
+            // Most-recently-active repo first
+            let aMax = a.value.compactMap(\.lastTimestamp).max() ?? .distantPast
+            let bMax = b.value.compactMap(\.lastTimestamp).max() ?? .distantPast
+            return aMax > bMax
         }
 
-        // Waiting sessions
-        if !waiting.isEmpty {
-            if !working.isEmpty { menu.addItem(.separator()) }
-            let header = NSMenuItem(title: "Waiting for input (\(waiting.count))", action: nil, keyEquivalent: "")
-            header.isEnabled = false
-            menu.addItem(header)
+        for (repoName, repoSessions) in sortedGroups {
+            if sortedGroups.count > 1 || repoName != "Other" {
+                let header = NSMenuItem(title: "📁 \(repoName)", action: nil, keyEquivalent: "")
+                header.isEnabled = false
+                menu.addItem(header)
+            }
 
-            for session in waiting {
-                let branch = (session.branch.isEmpty || session.branch == "—") ? "" : "  ⌥ \(session.branch)"
-                let title = "🟢 \(session.terminalType.icon) \(session.displayLabel)\(branch)"
-                let item = NSMenuItem(title: title, action: #selector(handleActiveSession(_:)), keyEquivalent: "")
-                item.target = self
-                item.tag = tagForSession(session)
-                item.toolTip = session.fullMessage.isEmpty ? session.shortId : session.fullMessage
+            for session in repoSessions {
+                let item = menuItem(for: session)
                 menu.addItem(item)
             }
-        }
 
-        // Done sessions (top 5)
-        let doneSlice = Array(done.prefix(5))
-        if !doneSlice.isEmpty {
             menu.addItem(.separator())
+        }
+
+        // Done sessions (top 10)
+        let doneSlice = Array(done.prefix(10))
+        if !doneSlice.isEmpty {
+            if activeSessions.isEmpty { menu.addItem(.separator()) }
             let header = NSMenuItem(title: "Recent", action: nil, keyEquivalent: "")
             header.isEnabled = false
             menu.addItem(header)
 
             for session in doneSlice {
-                let title = "⚪ \(session.displayLabel)"
-                let item = NSMenuItem(title: title, action: #selector(handleDoneSession(_:)), keyEquivalent: "")
+                let label = labelStore.label(for: session.id) ?? session.displayLabel
+                let age = session.relativeAge.isEmpty ? "" : " · \(session.relativeAge)"
+                let title = "⚪ \(label)\(age)"
+                let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
                 item.target = self
                 item.tag = tagForSession(session)
                 item.toolTip = session.fullMessage.isEmpty ? session.shortId : session.fullMessage
+
+                // Submenu for done sessions: Resume, Open PR, Set Label, Stats
+                let sub = NSMenu()
+                addSessionStatsItems(to: sub, session: session)
+                sub.addItem(.separator())
+
+                let resumeItem = NSMenuItem(title: "▶ Resume Session", action: #selector(handleResumeSession(_:)), keyEquivalent: "")
+                resumeItem.target = self
+                resumeItem.tag = tagForSession(session)
+                sub.addItem(resumeItem)
+
+                if !session.branch.isEmpty && session.branch != "main" && session.branch != "master" {
+                    let prItem = NSMenuItem(title: "🔗 Open PR / Branch", action: #selector(handleOpenPR(_:)), keyEquivalent: "")
+                    prItem.target = self
+                    prItem.tag = tagForSession(session)
+                    sub.addItem(prItem)
+                }
+
+                sub.addItem(.separator())
+                let labelItem = NSMenuItem(title: "🏷️ Set Label…", action: #selector(handleSetLabel(_:)), keyEquivalent: "")
+                labelItem.target = self
+                labelItem.tag = tagForSession(session)
+                sub.addItem(labelItem)
+
+                item.submenu = sub
                 menu.addItem(item)
             }
         }
@@ -190,6 +239,80 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(quitItem)
     }
 
+    /// Build a menu item for an active session (working/waiting)
+    private func menuItem(for session: CopilotSession) -> NSMenuItem {
+        let label = labelStore.label(for: session.id) ?? session.displayLabel
+        let branch = (session.branch.isEmpty || session.branch == "—") ? "" : "  ⌥ \(session.branch)"
+        let age = session.relativeAge.isEmpty ? "" : " · \(session.relativeAge)"
+        let title = "\(session.statusEmoji) \(session.terminalType.icon) \(label)\(branch)\(age)"
+        let item = NSMenuItem(title: title, action: #selector(handleActiveSession(_:)), keyEquivalent: "")
+        item.target = self
+        item.tag = tagForSession(session)
+        item.toolTip = session.fullMessage.isEmpty ? session.shortId : session.fullMessage
+
+        // Submenu with stats + actions
+        let sub = NSMenu()
+        addSessionStatsItems(to: sub, session: session)
+
+        if !session.branch.isEmpty && session.branch != "main" && session.branch != "master" {
+            sub.addItem(.separator())
+            let prItem = NSMenuItem(title: "🔗 Open PR / Branch", action: #selector(handleOpenPR(_:)), keyEquivalent: "")
+            prItem.target = self
+            prItem.tag = tagForSession(session)
+            sub.addItem(prItem)
+        }
+
+        sub.addItem(.separator())
+        let labelItem = NSMenuItem(title: "🏷️ Set Label…", action: #selector(handleSetLabel(_:)), keyEquivalent: "")
+        labelItem.target = self
+        labelItem.tag = tagForSession(session)
+        sub.addItem(labelItem)
+
+        item.submenu = sub
+        return item
+    }
+
+    /// Add session stats as disabled info items to a submenu
+    private func addSessionStatsItems(to menu: NSMenu, session: CopilotSession) {
+        let statusItem = NSMenuItem(title: "Status: \(session.statusLabel)", action: nil, keyEquivalent: "")
+        statusItem.isEnabled = false
+        menu.addItem(statusItem)
+
+        let turnsItem = NSMenuItem(title: "Turns: \(session.turns)", action: nil, keyEquivalent: "")
+        turnsItem.isEnabled = false
+        menu.addItem(turnsItem)
+
+        if let ts = session.lastTimestamp {
+            let age = CopilotSession.formatRelativeAge(from: ts, to: Date())
+            let fmt = DateFormatter()
+            fmt.dateStyle = .medium
+            fmt.timeStyle = .short
+            let dateStr = fmt.string(from: ts)
+            let ageItem = NSMenuItem(title: "Last active: \(dateStr) (\(age) ago)", action: nil, keyEquivalent: "")
+            ageItem.isEnabled = false
+            menu.addItem(ageItem)
+        }
+
+        if !session.branch.isEmpty {
+            let branchItem = NSMenuItem(title: "Branch: \(session.branch)", action: nil, keyEquivalent: "")
+            branchItem.isEnabled = false
+            menu.addItem(branchItem)
+        }
+
+        if !session.cwd.isEmpty && session.cwd != "/" {
+            let cwdDisplay = session.cwd.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+            let cwdItem = NSMenuItem(title: "CWD: \(cwdDisplay)", action: nil, keyEquivalent: "")
+            cwdItem.isEnabled = false
+            menu.addItem(cwdItem)
+        }
+
+        if !session.displayRepoName.isEmpty {
+            let repoItem = NSMenuItem(title: "Repo: \(session.displayRepoName)", action: nil, keyEquivalent: "")
+            repoItem.isEnabled = false
+            menu.addItem(repoItem)
+        }
+    }
+
     /// Map session to a stable tag index in the sessions array
     private func tagForSession(_ session: CopilotSession) -> Int {
         return sessions.firstIndex(where: { $0.id == session.id }) ?? -1
@@ -225,12 +348,68 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func handleDoneSession(_ sender: NSMenuItem) {
+    @objc private func handleResumeSession(_ sender: NSMenuItem) {
         guard sender.tag >= 0, sender.tag < sessions.count else { return }
         let session = sessions[sender.tag]
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             _ = self?.terminal.launch(command: ["copilot", "--resume", session.id],
                                       title: "copilot: \(session.shortId)")
+        }
+    }
+
+    @objc private func handleOpenPR(_ sender: NSMenuItem) {
+        guard sender.tag >= 0, sender.tag < sessions.count else { return }
+        let session = sessions[sender.tag]
+        guard !session.branch.isEmpty else { return }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let dir = session.cwd.isEmpty ? NSHomeDirectory() : session.cwd
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            proc.arguments = ["gh", "pr", "view", session.branch, "--web"]
+            proc.currentDirectoryURL = URL(fileURLWithPath: dir)
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = FileHandle.nullDevice
+            try? proc.run()
+            proc.waitUntilExit()
+
+            // If no PR exists, fall back to opening the branch on GitHub
+            if proc.terminationStatus != 0 {
+                let fallback = Process()
+                fallback.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+                fallback.arguments = ["gh", "browse", "--branch", session.branch]
+                fallback.currentDirectoryURL = URL(fileURLWithPath: dir)
+                fallback.standardOutput = FileHandle.nullDevice
+                fallback.standardError = FileHandle.nullDevice
+                try? fallback.run()
+                fallback.waitUntilExit()
+            }
+        }
+    }
+
+    @objc private func handleSetLabel(_ sender: NSMenuItem) {
+        guard sender.tag >= 0, sender.tag < sessions.count else { return }
+        let session = sessions[sender.tag]
+        let currentLabel = labelStore.label(for: session.id) ?? session.displayLabel
+
+        let alert = NSAlert()
+        alert.messageText = "Set Label"
+        alert.informativeText = "Enter a custom label for this session:"
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Clear")
+        alert.addButton(withTitle: "Cancel")
+
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        input.stringValue = currentLabel
+        alert.accessoryView = input
+        alert.window.initialFirstResponder = input
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            let newLabel = input.stringValue.trimmingCharacters(in: .whitespaces)
+            labelStore.setLabel(newLabel.isEmpty ? nil : newLabel, for: session.id)
+        } else if response == .alertSecondButtonReturn {
+            labelStore.setLabel(nil, for: session.id)
         }
     }
 

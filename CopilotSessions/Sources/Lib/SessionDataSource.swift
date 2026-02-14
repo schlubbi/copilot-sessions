@@ -44,6 +44,8 @@ public struct CopilotSession: Identifiable {
     public let pid: String?
     public let tty: String?
     public let terminalType: TerminalType
+    public let repository: String  // e.g. "github/github" or ""
+    public let cwd: String         // working directory
 
     public var isActive: Bool { status != .done }
 
@@ -70,12 +72,46 @@ public struct CopilotSession: Identifiable {
         return topic
     }
 
+    /// Human-readable relative age (e.g. "5m", "3h", "2d")
+    public var relativeAge: String {
+        guard let ts = lastTimestamp else { return "" }
+        return CopilotSession.formatRelativeAge(from: ts, to: Date())
+    }
+
+    /// Format a relative age string between two dates
+    public static func formatRelativeAge(from: Date, to: Date) -> String {
+        let seconds = Int(to.timeIntervalSince(from))
+        if seconds < 0 { return "" }
+        if seconds < 60 { return "now" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)h" }
+        let days = hours / 24
+        if days < 30 { return "\(days)d" }
+        let months = days / 30
+        return "\(months)mo"
+    }
+
+    /// Short display name for the repository (last 2 path components or folder name)
+    public var displayRepoName: String {
+        if !repository.isEmpty { return repository }
+        if cwd.isEmpty || cwd == "/" { return "" }
+        let parts = cwd.components(separatedBy: "/").filter { !$0.isEmpty }
+        if parts.count >= 2 {
+            return "\(parts[parts.count - 2])/\(parts.last!)"
+        }
+        return parts.last ?? ""
+    }
+
     public init(id: String, topic: String, fullMessage: String, branch: String,
                 turns: Int, lastTimestamp: Date?, status: SessionStatus,
-                pid: String?, tty: String?, terminalType: TerminalType) {
+                pid: String?, tty: String?, terminalType: TerminalType,
+                repository: String = "", cwd: String = "") {
         self.id = id; self.topic = topic; self.fullMessage = fullMessage
         self.branch = branch; self.turns = turns; self.lastTimestamp = lastTimestamp
         self.status = status; self.pid = pid; self.tty = tty; self.terminalType = terminalType
+        self.repository = repository; self.cwd = cwd
     }
 }
 
@@ -110,6 +146,30 @@ public class SessionDataSource {
             var branch = ""
             var turns = 0
             var lastTs: Date? = nil
+            var repository = ""
+            var cwd = ""
+
+            // Always parse workspace.yaml for repo/cwd/branch metadata
+            let yamlPath = "\(sessionBase)/\(sid)/workspace.yaml"
+            if let yamlStr = try? String(contentsOfFile: yamlPath, encoding: .utf8) {
+                for line in yamlStr.components(separatedBy: "\n") {
+                    if line.hasPrefix("repository: ") {
+                        repository = String(line.dropFirst("repository: ".count)).trimmingCharacters(in: .whitespaces)
+                    } else if line.hasPrefix("cwd: ") {
+                        cwd = String(line.dropFirst("cwd: ".count)).trimmingCharacters(in: .whitespaces)
+                    } else if line.hasPrefix("branch: ") && branch.isEmpty {
+                        branch = String(line.dropFirst("branch: ".count)).trimmingCharacters(in: .whitespaces)
+                    } else if line.hasPrefix("summary: ") {
+                        let val = String(line.dropFirst("summary: ".count)).trimmingCharacters(in: .whitespaces)
+                        if !val.isEmpty && val != "''" {
+                            topic = val
+                        }
+                    } else if line.hasPrefix("updated_at: ") {
+                        let val = String(line.dropFirst("updated_at: ".count)).trimmingCharacters(in: .whitespaces)
+                        lastTs = parseISO8601(val)
+                    }
+                }
+            }
 
             if let data = fm.contents(atPath: indexPath),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -122,28 +182,13 @@ public class SessionDataSource {
                 turns = snaps.count
 
                 if let last = snaps.last {
-                    branch = last["gitBranch"] as? String ?? ""
+                    if branch.isEmpty { branch = last["gitBranch"] as? String ?? "" }
                     if let ts = last["timestamp"] as? String {
                         lastTs = parseISO8601(ts)
                     }
                 }
             } else {
-                // Fallback: parse workspace.yaml + events.jsonl (newer format)
-                let yamlPath = "\(sessionBase)/\(sid)/workspace.yaml"
-                if let yamlStr = try? String(contentsOfFile: yamlPath, encoding: .utf8) {
-                    for line in yamlStr.components(separatedBy: "\n") {
-                        if line.hasPrefix("summary: ") {
-                            let val = String(line.dropFirst("summary: ".count)).trimmingCharacters(in: .whitespaces)
-                            if !val.isEmpty && val != "''" {
-                                topic = val
-                            }
-                        } else if line.hasPrefix("updated_at: ") {
-                            let val = String(line.dropFirst("updated_at: ".count)).trimmingCharacters(in: .whitespaces)
-                            lastTs = parseISO8601(val)
-                        }
-                    }
-                }
-
+                // Fallback for sessions without rewind-snapshots: parse events.jsonl
                 let eventsPath = "\(sessionBase)/\(sid)/events.jsonl"
                 if let eventsData = try? String(contentsOfFile: eventsPath, encoding: .utf8) {
                     var userMsgCount = 0
@@ -194,7 +239,9 @@ public class SessionDataSource {
                 status: status,
                 pid: pid,
                 tty: tty,
-                terminalType: termType
+                terminalType: termType,
+                repository: repository,
+                cwd: cwd
             ))
         }
 
