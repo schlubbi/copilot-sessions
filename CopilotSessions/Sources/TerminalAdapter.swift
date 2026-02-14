@@ -140,22 +140,24 @@ class KittyAdapter: TerminalAdapter {
     }
 
     func focusTab(tty: String) -> Bool {
-        // kitty @ ls to find tab by matching foreground process TTY
-        guard let data = shell([kittyBin, "@", "ls"]),
-              let json = try? JSONSerialization.jsonObject(with: Data(data.utf8)) as? [[String: Any]] else {
+        guard isRemoteControlAvailable else {
+            NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
             return false
         }
-
-        // Match by looking at env or foreground_processes
-        // Since we can't easily get TTY from kitty, match by PID instead
-        // This is called with TTY, so we need PID->TTY mapping from caller
-        // For now, bring kitty to front
+        guard let data = shell([kittyBin, "@", "ls"]),
+              let _ = try? JSONSerialization.jsonObject(with: Data(data.utf8)) as? [[String: Any]] else {
+            return false
+        }
         NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
         return false
     }
 
     /// Focus by PID (more reliable for kitty than TTY)
     func focusByPid(_ pid: Int) -> Bool {
+        guard isRemoteControlAvailable else {
+            NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
+            return false
+        }
         guard let data = shell([kittyBin, "@", "ls"]),
               let json = try? JSONSerialization.jsonObject(with: Data(data.utf8)) as? [[String: Any]] else {
             return false
@@ -179,18 +181,49 @@ class KittyAdapter: TerminalAdapter {
     }
 
     func launch(command: [String], title: String) -> Bool {
-        if isAvailable() {
+        // Resolve command to absolute path
+        let resolvedCmd = command.map { arg -> String in
+            if arg == "copilot" {
+                return copilotBin
+            }
+            return arg
+        }
+
+        if isRemoteControlAvailable {
             var cmd = [kittyBin, "@", "launch", "--type=tab", "--title", title]
-            cmd.append(contentsOf: command)
+            cmd.append(contentsOf: resolvedCmd)
             _ = shell(cmd)
         } else {
-            // Kitty installed but not running — launch directly
+            // No remote control — launch kitty directly with the command
             var cmd = [kittyBin, "--title", title]
-            cmd.append(contentsOf: command)
-            _ = shell(cmd)
+            cmd.append(contentsOf: resolvedCmd)
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: cmd[0])
+            proc.arguments = Array(cmd.dropFirst())
+            try? proc.run()
+            // Don't wait — kitty runs as a separate app
         }
         NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
         return true
+    }
+
+    /// Resolve copilot binary path
+    private var copilotBin: String {
+        // Use login shell to resolve PATH correctly
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        proc.arguments = ["-l", "-c", "which copilot"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        if let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !path.isEmpty {
+            return path
+        }
+        return "copilot"
     }
 
     private func shell(_ args: [String]) -> String? {
