@@ -136,16 +136,29 @@ class KittyAdapter: TerminalAdapter {
 
     /// Whether kitty remote control is active (socket exists)
     var isRemoteControlAvailable: Bool {
-        return FileManager.default.fileExists(atPath: "/tmp/kitty")
+        return kittySocket != nil
+    }
+
+    /// Find the kitty remote control socket (may be /tmp/kitty or /tmp/kitty-PID)
+    private var kittySocket: String? {
+        if FileManager.default.fileExists(atPath: "/tmp/kitty") {
+            return "/tmp/kitty"
+        }
+        // Kitty appends PID when multiple instances or default behavior
+        let contents = (try? FileManager.default.contentsOfDirectory(atPath: "/tmp")) ?? []
+        return contents
+            .filter { $0.hasPrefix("kitty") }
+            .sorted()
+            .map { "/tmp/\($0)" }
+            .first
     }
 
     func focusTab(tty: String) -> Bool {
-        guard isRemoteControlAvailable else {
+        guard let socket = kittySocket else {
             NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
             return false
         }
-        guard let data = shell([kittyBin, "@", "ls"]),
-              let _ = try? JSONSerialization.jsonObject(with: Data(data.utf8)) as? [[String: Any]] else {
+        guard let _ = shell([kittyBin, "@", "--to", "unix:\(socket)", "ls"]) else {
             return false
         }
         NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
@@ -154,12 +167,10 @@ class KittyAdapter: TerminalAdapter {
 
     /// Focus by PID (more reliable for kitty than TTY)
     func focusByPid(_ pid: Int) -> Bool {
-        guard isRemoteControlAvailable else {
-            NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
-            return false
-        }
-        guard let data = shell([kittyBin, "@", "ls"]),
+        guard let socket = kittySocket,
+              let data = shell([kittyBin, "@", "--to", "unix:\(socket)", "ls"]),
               let json = try? JSONSerialization.jsonObject(with: Data(data.utf8)) as? [[String: Any]] else {
+            NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
             return false
         }
 
@@ -169,7 +180,7 @@ class KittyAdapter: TerminalAdapter {
                     for fg in window["foreground_processes"] as? [[String: Any]] ?? [] {
                         if fg["pid"] as? Int == pid {
                             let tabId = tab["id"] as? Int ?? 0
-                            _ = shell([kittyBin, "@", "focus-tab", "--match", "id:\(tabId)"])
+                            _ = shell([kittyBin, "@", "--to", "unix:\(socket)", "focus-tab", "--match", "id:\(tabId)"])
                             NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
                             return true
                         }
@@ -189,21 +200,19 @@ class KittyAdapter: TerminalAdapter {
             return arg
         }
 
-        if isRemoteControlAvailable {
-            var cmd = [kittyBin, "@", "launch", "--type=tab", "--title", title]
+        if let socket = kittySocket {
+            // Remote control available — open tab in existing kitty
+            var cmd = [kittyBin, "@", "--to", "unix:\(socket)", "launch", "--type=tab", "--title", title]
             cmd.append(contentsOf: resolvedCmd)
             _ = shell(cmd)
+            NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
         } else {
-            // No remote control — launch kitty directly with the command
-            var cmd = [kittyBin, "--title", title]
-            cmd.append(contentsOf: resolvedCmd)
+            // No socket — launch kitty directly with the command
             let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: cmd[0])
-            proc.arguments = Array(cmd.dropFirst())
+            proc.executableURL = URL(fileURLWithPath: kittyBin)
+            proc.arguments = ["--title", title] + resolvedCmd
             try? proc.run()
-            // Don't wait — kitty runs as a separate app
         }
-        NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
         return true
     }
 
