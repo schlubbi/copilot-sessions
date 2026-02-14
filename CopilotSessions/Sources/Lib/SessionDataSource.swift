@@ -178,7 +178,8 @@ public class SessionDataSource {
 
                 let msg = first["userMessage"] as? String ?? ""
                 fullMsg = msg
-                topic = extractTopic(from: msg)
+                // Only use first user message as topic if workspace.yaml summary is empty
+                if topic.isEmpty { topic = extractTopic(from: msg) }
                 turns = snaps.count
 
                 if let last = snaps.last {
