@@ -81,7 +81,7 @@ public struct CopilotSession: Identifiable {
 
 /// Reads Copilot session state from disk and correlates with running processes
 public class SessionDataSource {
-    private let sessionBase: String
+    public var sessionBase: String
 
     public init() {
         self.sessionBase = NSHomeDirectory() + "/.copilot/session-state"
@@ -170,7 +170,10 @@ public class SessionDataSource {
             let status: SessionStatus
             let termType: TerminalType
             if isAlive, let pidStr = pid, let pidInt = Int32(pidStr) {
-                status = ProcessInspector.isWorking(pidInt, ppidMap: ppidMap) ? .working : .waiting
+                // Primary: derive status from events.jsonl (ground truth)
+                // Fallback: process heuristic (child process inspection)
+                status = lastEventStatus(sessionId: sid)
+                    ?? (ProcessInspector.isWorking(pidInt, ppidMap: ppidMap) ? .working : .waiting)
                 termType = ProcessInspector.detectTerminal(pidInt)
             } else {
                 status = .done
@@ -288,6 +291,37 @@ public class SessionDataSource {
     }
 
     // MARK: - Helpers
+
+    /// Determine session status from the last event in events.jsonl.
+    /// Returns .working if the assistant/tool is mid-turn, .waiting if the
+    /// last turn ended (awaiting user input), or nil if no events file.
+    func lastEventStatus(sessionId sid: String) -> SessionStatus? {
+        let eventsPath = "\(sessionBase)/\(sid)/events.jsonl"
+        guard let fh = FileHandle(forReadingAtPath: eventsPath) else { return nil }
+        defer { fh.closeFile() }
+
+        // Read the last ~4KB to find the final event (avoids reading multi-MB files)
+        let fileSize = fh.seekToEndOfFile()
+        let readStart = fileSize > 4096 ? fileSize - 4096 : 0
+        fh.seek(toFileOffset: readStart)
+        let tailData = fh.readDataToEndOfFile()
+        guard let tail = String(data: tailData, encoding: .utf8) else { return nil }
+
+        var lastType: String?
+        for line in tail.components(separatedBy: "\n").reversed() where !line.isEmpty {
+            guard let ld = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: ld) as? [String: Any],
+                  let type = obj["type"] as? String else { continue }
+            lastType = type
+            break
+        }
+
+        guard let eventType = lastType else { return nil }
+        // Session is idle when the assistant finished its turn
+        if eventType == "assistant.turn_end" { return .waiting }
+        // Actively processing
+        return .working
+    }
 
     private func shell(_ args: String...) -> String? {
         let proc = Process()
