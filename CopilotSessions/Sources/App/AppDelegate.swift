@@ -24,6 +24,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var timer: Timer?
     private var sessions: [CopilotSession] = []
     private let labelStore = LabelStore()
+    private let widgetExporter = WidgetDataExporter()
     private var hotKeyRef: EventHotKeyRef?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -74,6 +75,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             button.title = "🤖"
         }
+        // Export data for widget consumption
+        widgetExporter.export(sessions: sessions)
     }
 
     // MARK: - Global Hotkey (⌥⇧C)

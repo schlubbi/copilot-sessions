@@ -4,22 +4,33 @@ A session dashboard and manager for [GitHub Copilot CLI](https://docs.github.com
 
 Inspired by [nice-semaphore](https://github.com/nice-computer/nice-semaphore) for Claude Code.
 
-![CLI Screenshot](docs/cli.png)
-
 ## Features
 
-- **CLI dashboard** — see all active and recent Copilot sessions at a glance
-- **Interactive picker** — select a session to focus its tab or resume it
-- **macOS menu bar app** — 🤖 in your menu bar with click-to-focus/resume
-- **Terminal agnostic** — extensible adapter layer for Apple Terminal, kitty, iTerm2
-- **Auto-detection** — finds the best available terminal emulator
+### Menu Bar App
+- **🤖 Status icon** — shows active session count, ⚡ when sessions are working
+- **Session status** — 🟡 working, 🟢 waiting for input, ⚪ done (derived from `events.jsonl`)
+- **Group by repository** — sessions organized under repo headers (📁 github/github)
+- **Terminal detection** — 🖥️ Terminal, 🐱 kitty, 🔲 iTerm2, 👻 Ghostty, 🌐 WezTerm, ⬛ Alacritty
+- **Session age** — relative timestamps (5m, 3h, 2d) inline
+- **Click to focus** — jumps to the session's terminal tab
+- **Resume sessions** — reopen done sessions with `copilot --resume`
+- **Open PR / Branch** — opens the session's branch on GitHub via `gh`
+- **Session stats** — submenu with turns, duration, branch, CWD, repo
+- **Custom labels** — rename sessions with persistent labels (🏷️)
+- **Global hotkey** — `⌥⇧C` opens the menu from anywhere
+- **Settings** — pick preferred terminal for new sessions
+- **Widget data export** — writes JSON for Scriptable/Shortcuts desktop widgets
+
+### CLI Dashboard
+- **Table view** — all active and recent sessions with topic, branch, turns
+- **Interactive picker** — select a session to focus or resume
 
 ## Requirements
 
 - macOS 13+
 - [GitHub Copilot CLI](https://docs.github.com/copilot/concepts/agents/about-copilot-cli)
-- Python 3.9+
-- Swift 5.9+ (for the menu bar app)
+- Python 3.9+ (for CLI)
+- Swift 5.9+ (for menu bar app)
 
 ## Install
 
@@ -29,7 +40,7 @@ cd copilot-sessions
 make install
 ```
 
-This symlinks the CLI to `~/.local/bin/copilot-sessions` and builds the menu bar app.
+This symlinks the CLI to `~/.local/bin/copilot-sessions` and builds the menu bar app with ad-hoc code signing.
 
 To make the menu bar app findable via Spotlight:
 
@@ -41,68 +52,58 @@ To auto-start on login, add `CopilotSessions.app` in **System Settings → Gener
 
 ## Usage
 
-### CLI
-
-```bash
-# Dashboard of active sessions
-copilot-sessions
-
-# Include recent inactive sessions
-copilot-sessions --all
-
-# Interactive picker — select to focus or resume
-copilot-sessions --pick
-
-# Focus a specific session's tab
-copilot-sessions --focus <session-id-prefix>
-
-# Resume an inactive session in a new terminal tab
-copilot-sessions --resume <session-id>
-```
-
 ### Menu Bar App
 
 ```bash
 make run-menubar
+# or
+open CopilotSessions.app
 ```
 
-The menu bar shows 🤖 with the number of active sessions. Click to see the full list — click a session to focus or resume it, or start a new one.
+The menu bar shows 🤖 with active session count. Click to see all sessions grouped by repository. Each session has a submenu with stats and actions (Resume, Open PR, Set Label).
+
+**Keyboard shortcut:** Press `⌥⇧C` from anywhere to open the menu.
+
+### CLI
+
+```bash
+copilot-sessions            # Dashboard of active sessions
+copilot-sessions --all      # Include recent inactive sessions
+copilot-sessions --pick     # Interactive picker
+copilot-sessions --focus ID # Focus a session's tab
+copilot-sessions --resume ID # Resume in new terminal tab
+```
+
+### Desktop Widget (Scriptable)
+
+The app exports session data to `~/Library/Application Support/CopilotSessions/widget-data.json` every 5 seconds.
+
+1. Install [Scriptable](https://scriptable.app) from the Mac App Store
+2. Create a new script and paste `widgets/CopilotSessions.scriptable.js`
+3. Add a Scriptable widget to your desktop and select the script
 
 ## Terminal Support
 
-The app auto-detects your terminal and uses the best available integration:
+| Terminal | Focus | New Tab | Detection |
+|----------|-------|---------|-----------|
+| **Apple Terminal** | ✅ AppleScript | ✅ System Events | Always available |
+| **kitty** | ✅ Remote control | ✅ `kitty @` | `allow_remote_control yes` |
+| **iTerm2** | ✅ AppleScript | ✅ AppleScript | Auto-detected |
 
-| Terminal | Focus Tab | New Tab | How |
-|----------|-----------|---------|-----|
-| **Apple Terminal** | ✅ via AppleScript TTY matching | ✅ via System Events | Always available on macOS |
-| **kitty** | ✅ via remote control PID matching | ✅ via `kitty @` or direct launch | Needs `allow_remote_control yes` |
-| **iTerm2** | ✅ via AppleScript TTY matching | ✅ via AppleScript | Needs iTerm2 installed |
+### kitty Setup
 
-### kitty Setup (optional)
-
-If you use kitty, add to `~/.config/kitty/kitty.conf`:
+Add to `~/.config/kitty/kitty.conf`:
 
 ```
 allow_remote_control yes
 listen_on unix:/tmp/kitty
 ```
 
-### Adding a new terminal
+### Adding a New Terminal
 
-Implement the `TerminalAdapter` protocol in `CopilotSessions/Sources/TerminalAdapter.swift`:
+Implement `TerminalAdapter` in `CopilotSessions/Sources/Lib/TerminalAdapter.swift` and add it to `allTerminalAdapters`.
 
-```swift
-protocol TerminalAdapter {
-    var name: String { get }
-    func isAvailable() -> Bool
-    func focusTab(tty: String) -> Bool
-    func launch(command: [String], title: String) -> Bool
-}
-```
-
-Then add it to `detectTerminalAdapter()`.
-
-## How It Works
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────┐
@@ -110,28 +111,38 @@ Then add it to `detectTerminalAdapter()`.
 │                                                  │
 │  ps ─────────► running copilot PIDs + TTYs       │
 │  lsof ───────► PID → session ID mapping          │
-│  ~/.copilot/ ► session metadata (topic, branch)  │
+│  workspace.yaml ► repo, branch, summary, cwd     │
+│  events.jsonl ► session status (ground truth)     │
+│  rewind-snapshots ► topic, turns, timestamps      │
 └──────────────────────┬──────────────────────────┘
                        │
            ┌───────────┴───────────┐
            │                       │
      ┌─────▼─────┐         ┌──────▼──────┐
-     │    CLI     │         │  Menu Bar   │
-     │ dashboard  │         │    App      │
-     │  + picker  │         │  (Swift)    │
+     │    CLI     │         │  Menu Bar   │──► widget-data.json
+     │ dashboard  │         │    App      │──► LabelStore
+     │  + picker  │         │  (Swift)    │──► Global Hotkey
      └─────┬─────┘         └──────┬──────┘
            │                       │
            └───────────┬───────────┘
                        │
               ┌────────▼────────┐
               │ TerminalAdapter │
-              │   (protocol)    │
               ├─────────────────┤
               │ Apple Terminal  │
               │ kitty           │
               │ iTerm2          │
               └─────────────────┘
 ```
+
+## Testing
+
+```bash
+cd CopilotSessions
+swift test
+```
+
+88 tests covering: topic extraction, session model, process inspection, terminal adapters, event status detection, relative age formatting, repository grouping, label persistence, widget data export.
 
 ## License
 
