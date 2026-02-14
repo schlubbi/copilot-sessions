@@ -8,6 +8,7 @@ cli:
 menubar:
 	cd CopilotSessions && swift build -c release
 	cp CopilotSessions/.build/release/CopilotSessions CopilotSessions.app/Contents/MacOS/CopilotSessions
+	codesign --force --sign - --identifier com.schlubbi.copilot-sessions --entitlements CopilotSessions.entitlements CopilotSessions.app
 
 install: cli menubar
 	@echo "CLI installed to ~/.local/bin/copilot-sessions"
