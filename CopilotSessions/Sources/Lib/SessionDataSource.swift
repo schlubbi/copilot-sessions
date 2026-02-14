@@ -92,7 +92,8 @@ public class SessionDataSource {
         let pidToSession = getPidToSession()
         let activeSids = Set(pidToSession.values)
         let sessionToPid = Dictionary(pidToSession.map { ($0.value, $0.key) }, uniquingKeysWith: { first, _ in first })
-        let ppidMap = ProcessInspector.buildPpidMap()
+        let copilotPidSet = Set(pidToSession.keys.compactMap { Int32($0) })
+        let ppidMap = ProcessInspector.buildPpidMap(forPids: copilotPidSet)
 
         var sessions: [CopilotSession] = []
 
@@ -350,13 +351,16 @@ public enum ProcessInspector {
     /// MCP server process names — these are always-on children, not tool work
     static let mcpNames: Set<String> = ["npm", "node", "azmcp"]
 
-    /// Build a map of parent PID → child PIDs for all processes (takes ~1ms)
-    public static func buildPpidMap() -> [pid_t: [pid_t]] {
+    /// Build a map of parent PID → child PIDs, scoped to the given PIDs and their descendants.
+    /// Only inspects the provided PIDs to avoid triggering macOS TCC prompts for unrelated apps.
+    public static func buildPpidMap(forPids pids: Set<pid_t> = []) -> [pid_t: [pid_t]] {
         var allPids = [pid_t](repeating: 0, count: 8192)
         let bytes = proc_listpids(UInt32(PROC_ALL_PIDS), 0, &allPids,
             Int32(MemoryLayout<pid_t>.stride * allPids.count))
         let count = Int(bytes) / MemoryLayout<pid_t>.stride
-        var map: [pid_t: [pid_t]] = [:]
+
+        // First pass: build full PPID lookup (pid → parent) using only the lightweight pbi_ppid
+        var pidToParent: [pid_t: pid_t] = [:]
         for i in 0..<count {
             let cpid = allPids[i]
             guard cpid > 0 else { continue }
@@ -364,7 +368,35 @@ public enum ProcessInspector {
             let ret = proc_pidinfo(cpid, PROC_PIDTBSDINFO, 0, &bsdInfo,
                 Int32(MemoryLayout<proc_bsdinfo>.stride))
             if ret > 0 {
-                map[pid_t(bsdInfo.pbi_ppid), default: []].append(cpid)
+                pidToParent[cpid] = pid_t(bsdInfo.pbi_ppid)
+            }
+        }
+
+        // If no scope provided, return full map (for tests/backward compat)
+        if pids.isEmpty {
+            var map: [pid_t: [pid_t]] = [:]
+            for (child, parent) in pidToParent {
+                map[parent, default: []].append(child)
+            }
+            return map
+        }
+
+        // Second pass: collect only PIDs relevant to the scoped set (children + ancestors)
+        var relevant = pids
+        // Add all descendants
+        var queue = Array(pids)
+        while !queue.isEmpty {
+            let p = queue.removeFirst()
+            for (child, parent) in pidToParent where parent == p && !relevant.contains(child) {
+                relevant.insert(child)
+                queue.append(child)
+            }
+        }
+
+        var map: [pid_t: [pid_t]] = [:]
+        for child in relevant {
+            if let parent = pidToParent[child] {
+                map[parent, default: []].append(child)
             }
         }
         return map
