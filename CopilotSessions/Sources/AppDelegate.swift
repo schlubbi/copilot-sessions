@@ -96,7 +96,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let item = NSMenuItem(title: title, action: #selector(handleActiveSession(_:)), keyEquivalent: "")
                 item.target = self
                 item.tag = tagForSession(session)
-                item.toolTip = "PID \(session.pid ?? "?") · \(session.turns) turns · Working · \(session.terminalType.rawValue)"
+                item.toolTip = session.fullMessage.isEmpty ? session.shortId : session.fullMessage
                 menu.addItem(item)
             }
         }
@@ -114,7 +114,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let item = NSMenuItem(title: title, action: #selector(handleActiveSession(_:)), keyEquivalent: "")
                 item.target = self
                 item.tag = tagForSession(session)
-                item.toolTip = "PID \(session.pid ?? "?") · \(session.turns) turns · Waiting for input · \(session.terminalType.rawValue)"
+                item.toolTip = session.fullMessage.isEmpty ? session.shortId : session.fullMessage
                 menu.addItem(item)
             }
         }
@@ -132,7 +132,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let item = NSMenuItem(title: title, action: #selector(handleDoneSession(_:)), keyEquivalent: "")
                 item.target = self
                 item.tag = tagForSession(session)
-                item.toolTip = "Click to resume in new tab"
+                item.toolTip = session.fullMessage.isEmpty ? session.shortId : session.fullMessage
                 menu.addItem(item)
             }
         }

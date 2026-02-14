@@ -36,6 +36,7 @@ struct CopilotSession: Identifiable {
     let id: String           // full session UUID
     var shortId: String { String(id.prefix(12)) }
     let topic: String
+    let fullMessage: String  // untruncated first user message
     let branch: String
     let turns: Int
     let lastTimestamp: Date?
@@ -96,6 +97,7 @@ class SessionDataSource {
             let indexPath = "\(sessionBase)/\(sid)/rewind-snapshots/index.json"
 
             var topic = ""
+            var fullMsg = ""
             var branch = ""
             var turns = 0
             var lastTs: Date? = nil
@@ -106,6 +108,7 @@ class SessionDataSource {
                let first = snaps.first {
 
                 let msg = first["userMessage"] as? String ?? ""
+                fullMsg = msg
                 topic = extractTopic(from: msg)
                 turns = snaps.count
 
@@ -137,6 +140,7 @@ class SessionDataSource {
             sessions.append(CopilotSession(
                 id: sid,
                 topic: topic,
+                fullMessage: fullMsg,
                 branch: branch,
                 turns: turns,
                 lastTimestamp: lastTs,
