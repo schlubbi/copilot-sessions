@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import CopilotSessionsLib
 
 // Keep delegate alive for the lifetime of the app
 private var appDelegate: AppDelegate!
@@ -201,15 +202,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let session = sessions[sender.tag]
         guard session.isActive else { return }
 
-        if let tty = session.tty {
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                guard let terminal = self?.terminal else { return }
-                if let kitty = terminal as? KittyAdapter, let pid = session.pid, let pidInt = Int(pid) {
-                    _ = kitty.focusByPid(pidInt)
-                } else {
-                    _ = terminal.focusTab(tty: "/dev/\(tty)")
-                }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            // Use the session's actual terminal for focus, not the user's preferred one
+            let adapter = self?.adapterForSession(session) ?? self?.terminal
+            guard let adapter = adapter else { return }
+
+            if let kitty = adapter as? KittyAdapter, let pid = session.pid, let pidInt = Int(pid) {
+                _ = kitty.focusByPid(pidInt)
+            } else if let tty = session.tty {
+                _ = adapter.focusTab(tty: "/dev/\(tty)")
             }
+        }
+    }
+
+    /// Returns the correct adapter for a session's detected terminal
+    private func adapterForSession(_ session: CopilotSession) -> TerminalAdapter? {
+        switch session.terminalType {
+        case .terminal:  return allTerminalAdapters.first { $0.key == "terminal" }
+        case .kitty:     return allTerminalAdapters.first { $0.key == "kitty" }
+        case .iterm2:    return allTerminalAdapters.first { $0.key == "iterm2" }
+        default:         return terminal  // fallback to preferred
         }
     }
 

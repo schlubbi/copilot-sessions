@@ -2,14 +2,14 @@ import Foundation
 import Darwin
 
 /// Session lifecycle status
-enum SessionStatus: String {
+public enum SessionStatus: String {
     case working   // actively running tools or using CPU
     case waiting   // process alive, idle — waiting for user input
     case done      // no running process
 }
 
 /// Known terminal emulators with display info
-enum TerminalType: String {
+public enum TerminalType: String {
     case terminal = "Terminal"
     case kitty    = "kitty"
     case iterm2   = "iTerm2"
@@ -18,7 +18,7 @@ enum TerminalType: String {
     case ghostty  = "Ghostty"
     case unknown  = "?"
 
-    var icon: String {
+    public var icon: String {
         switch self {
         case .terminal:  return "🖥️"
         case .kitty:     return "🐱"
@@ -32,22 +32,22 @@ enum TerminalType: String {
 }
 
 /// Represents the state of a Copilot CLI session
-struct CopilotSession: Identifiable {
-    let id: String           // full session UUID
-    var shortId: String { String(id.prefix(12)) }
-    let topic: String
-    let fullMessage: String  // untruncated first user message
-    let branch: String
-    let turns: Int
-    let lastTimestamp: Date?
-    let status: SessionStatus
-    let pid: String?
-    let tty: String?
-    let terminalType: TerminalType
+public struct CopilotSession: Identifiable {
+    public let id: String
+    public var shortId: String { String(id.prefix(12)) }
+    public let topic: String
+    public let fullMessage: String
+    public let branch: String
+    public let turns: Int
+    public let lastTimestamp: Date?
+    public let status: SessionStatus
+    public let pid: String?
+    public let tty: String?
+    public let terminalType: TerminalType
 
-    var isActive: Bool { status != .done }
+    public var isActive: Bool { status != .done }
 
-    var statusEmoji: String {
+    public var statusEmoji: String {
         switch status {
         case .working: return "🟡"
         case .waiting: return "🟢"
@@ -55,7 +55,7 @@ struct CopilotSession: Identifiable {
         }
     }
 
-    var statusLabel: String {
+    public var statusLabel: String {
         switch status {
         case .working: return "Working"
         case .waiting: return "Waiting for input"
@@ -63,23 +63,31 @@ struct CopilotSession: Identifiable {
         }
     }
 
-    var displayLabel: String {
+    public var displayLabel: String {
         if topic.isEmpty {
             return shortId
         }
         return topic
     }
+
+    public init(id: String, topic: String, fullMessage: String, branch: String,
+                turns: Int, lastTimestamp: Date?, status: SessionStatus,
+                pid: String?, tty: String?, terminalType: TerminalType) {
+        self.id = id; self.topic = topic; self.fullMessage = fullMessage
+        self.branch = branch; self.turns = turns; self.lastTimestamp = lastTimestamp
+        self.status = status; self.pid = pid; self.tty = tty; self.terminalType = terminalType
+    }
 }
 
 /// Reads Copilot session state from disk and correlates with running processes
-class SessionDataSource {
+public class SessionDataSource {
     private let sessionBase: String
 
-    init() {
+    public init() {
         self.sessionBase = NSHomeDirectory() + "/.copilot/session-state"
     }
 
-    func loadSessions() -> [CopilotSession] {
+    public func loadSessions() -> [CopilotSession] {
         let runningPids = getRunningCopilotPids()
         let pidToSession = getPidToSession()
         let activeSids = Set(pidToSession.values)
@@ -205,7 +213,7 @@ class SessionDataSource {
 
     // MARK: - Topic extraction
 
-    private func extractTopic(from msg: String) -> String {
+    func extractTopic(from msg: String) -> String {
         var line = msg.components(separatedBy: "\n").first ?? ""
         // Strip URLs
         line = line.replacingOccurrences(of: "https?://\\S+\\s*,?\\s*", with: "", options: .regularExpression)
@@ -260,7 +268,7 @@ class SessionDataSource {
         return String(data: data, encoding: .utf8)
     }
 
-    private func parseISO8601(_ str: String) -> Date? {
+    func parseISO8601(_ str: String) -> Date? {
         let fmt = ISO8601DateFormatter()
         fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return fmt.date(from: str) ?? ISO8601DateFormatter().date(from: str)
@@ -269,12 +277,12 @@ class SessionDataSource {
 
 // MARK: - Native process inspection via Darwin APIs (no shell out)
 
-enum ProcessInspector {
+public enum ProcessInspector {
     /// MCP server process names — these are always-on children, not tool work
-    private static let mcpNames: Set<String> = ["npm", "node", "azmcp"]
+    static let mcpNames: Set<String> = ["npm", "node", "azmcp"]
 
     /// Build a map of parent PID → child PIDs for all processes (takes ~1ms)
-    static func buildPpidMap() -> [pid_t: [pid_t]] {
+    public static func buildPpidMap() -> [pid_t: [pid_t]] {
         var allPids = [pid_t](repeating: 0, count: 8192)
         let bytes = proc_listpids(UInt32(PROC_ALL_PIDS), 0, &allPids,
             Int32(MemoryLayout<pid_t>.stride * allPids.count))
@@ -294,7 +302,7 @@ enum ProcessInspector {
     }
 
     /// Determines if a copilot process is actively working (running tools)
-    static func isWorking(_ pid: pid_t, ppidMap: [pid_t: [pid_t]]) -> Bool {
+    public static func isWorking(_ pid: pid_t, ppidMap: [pid_t: [pid_t]]) -> Bool {
         let children = ppidMap[pid] ?? []
         // Check if any child is a tool process (not MCP infrastructure)
         let hasToolChild = children.contains { childPid in
@@ -309,7 +317,7 @@ enum ProcessInspector {
     }
 
     /// Get the executable base name for a PID via proc_pidpath
-    static func processName(_ pid: pid_t) -> String? {
+    public static func processName(_ pid: pid_t) -> String? {
         var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
         let ret = proc_pidpath(pid, &buffer, UInt32(MAXPATHLEN))
         guard ret > 0 else { return nil }
@@ -318,7 +326,7 @@ enum ProcessInspector {
     }
 
     /// Measure CPU usage over a short window using proc_pidinfo
-    static func cpuUsagePercent(_ pid: pid_t, window: TimeInterval = 0.1) -> Double {
+    public static func cpuUsagePercent(_ pid: pid_t, window: TimeInterval = 0.1) -> Double {
         var info1 = proc_taskinfo()
         let size = Int32(MemoryLayout<proc_taskinfo>.stride)
         guard proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &info1, size) > 0 else { return 0 }
@@ -336,8 +344,7 @@ enum ProcessInspector {
     }
 
     /// Detect which terminal emulator a copilot process is running in
-    /// by walking the PPID chain via sysctl (works through root-owned login)
-    static func detectTerminal(_ pid: pid_t) -> TerminalType {
+    public static func detectTerminal(_ pid: pid_t) -> TerminalType {
         let terminalPatterns: [(String, TerminalType)] = [
             ("Terminal.app", .terminal),
             ("kitty.app", .kitty),

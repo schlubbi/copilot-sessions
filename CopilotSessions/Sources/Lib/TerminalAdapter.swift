@@ -2,7 +2,7 @@ import Foundation
 import AppKit
 
 /// Protocol for terminal emulator adapters
-protocol TerminalAdapter {
+public protocol TerminalAdapter {
     /// Unique key for persistence (e.g. "terminal", "kitty", "iterm2")
     var key: String { get }
 
@@ -23,14 +23,14 @@ protocol TerminalAdapter {
 }
 
 /// All known terminal adapters
-let allTerminalAdapters: [TerminalAdapter] = [
+public let allTerminalAdapters: [TerminalAdapter] = [
     AppleTerminalAdapter(),
     KittyAdapter(),
     ITermAdapter(),
 ]
 
 /// Returns the user's preferred terminal, or auto-detects
-func preferredTerminalAdapter() -> TerminalAdapter {
+public func preferredTerminalAdapter() -> TerminalAdapter {
     if let saved = UserDefaults.standard.string(forKey: "terminalAdapter"),
        let match = allTerminalAdapters.first(where: { $0.key == saved && $0.isAvailable() }) {
         return match
@@ -39,7 +39,7 @@ func preferredTerminalAdapter() -> TerminalAdapter {
 }
 
 /// Detects and returns the best available terminal adapter
-func detectTerminalAdapter() -> TerminalAdapter {
+public func detectTerminalAdapter() -> TerminalAdapter {
     let kitty = KittyAdapter()
     if kitty.isAvailable() { return kitty }
     return AppleTerminalAdapter()
@@ -47,16 +47,16 @@ func detectTerminalAdapter() -> TerminalAdapter {
 
 // MARK: - Apple Terminal
 
-class AppleTerminalAdapter: TerminalAdapter {
-    let key = "terminal"
-    let name = "Terminal"
-    let icon = "🖥️"
+public class AppleTerminalAdapter: TerminalAdapter {
+    public let key = "terminal"
+    public let name = "Terminal"
+    public let icon = "🖥️"
 
-    func isAvailable() -> Bool {
+    public func isAvailable() -> Bool {
         return true // Always present on macOS
     }
 
-    func focusTab(tty: String) -> Bool {
+    public func focusTab(tty: String) -> Bool {
         // Use AppleScript to find and focus the tab with this TTY
         let script = """
         tell application "Terminal"
@@ -76,7 +76,7 @@ class AppleTerminalAdapter: TerminalAdapter {
         return runAppleScript(script) == "true"
     }
 
-    func launch(command: [String], title: String) -> Bool {
+    public func launch(command: [String], title: String) -> Bool {
         let cmd = command.map { $0.replacingOccurrences(of: "'", with: "'\\''") }.joined(separator: " ")
         // With accessibility permissions, use System Events to open a new tab
         // then run the command in it
@@ -123,19 +123,19 @@ class AppleTerminalAdapter: TerminalAdapter {
 
 // MARK: - Kitty
 
-class KittyAdapter: TerminalAdapter {
-    let key = "kitty"
-    let name = "kitty"
-    let icon = "🐱"
+public class KittyAdapter: TerminalAdapter {
+    public let key = "kitty"
+    public let name = "kitty"
+    public let icon = "🐱"
     private let kittyBin = "/Applications/kitty.app/Contents/MacOS/kitty"
 
-    func isAvailable() -> Bool {
+    public func isAvailable() -> Bool {
         // Kitty is available if the app is installed
         return FileManager.default.fileExists(atPath: kittyBin)
     }
 
     /// Whether kitty remote control is active (socket exists)
-    var isRemoteControlAvailable: Bool {
+    public var isRemoteControlAvailable: Bool {
         return kittySocket != nil
     }
 
@@ -153,7 +153,7 @@ class KittyAdapter: TerminalAdapter {
             .first
     }
 
-    func focusTab(tty: String) -> Bool {
+    public func focusTab(tty: String) -> Bool {
         guard let socket = kittySocket else {
             NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/kitty.app"))
             return false
@@ -166,7 +166,7 @@ class KittyAdapter: TerminalAdapter {
     }
 
     /// Focus by PID (more reliable for kitty than TTY)
-    func focusByPid(_ pid: Int) -> Bool {
+    public func focusByPid(_ pid: Int) -> Bool {
         guard let socket = kittySocket,
               let data = shell([kittyBin, "@", "--to", "unix:\(socket)", "ls"]),
               let json = try? JSONSerialization.jsonObject(with: Data(data.utf8)) as? [[String: Any]] else {
@@ -191,7 +191,7 @@ class KittyAdapter: TerminalAdapter {
         return false
     }
 
-    func launch(command: [String], title: String) -> Bool {
+    public func launch(command: [String], title: String) -> Bool {
         // Resolve command to absolute path
         let resolvedCmd = command.map { arg -> String in
             if arg == "copilot" {
@@ -251,16 +251,16 @@ class KittyAdapter: TerminalAdapter {
 
 // MARK: - iTerm2 (stub for future)
 
-class ITermAdapter: TerminalAdapter {
-    let key = "iterm2"
-    let name = "iTerm2"
-    let icon = "🔲"
+public class ITermAdapter: TerminalAdapter {
+    public let key = "iterm2"
+    public let name = "iTerm2"
+    public let icon = "🔲"
 
-    func isAvailable() -> Bool {
+    public func isAvailable() -> Bool {
         return NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.googlecode.iterm2") != nil
     }
 
-    func focusTab(tty: String) -> Bool {
+    public func focusTab(tty: String) -> Bool {
         let script = """
         tell application "iTerm2"
             activate
@@ -281,7 +281,7 @@ class ITermAdapter: TerminalAdapter {
         return runAppleScript(script) == "true"
     }
 
-    func launch(command: [String], title: String) -> Bool {
+    public func launch(command: [String], title: String) -> Bool {
         let cmd = command.map { $0.replacingOccurrences(of: "\"", with: "\\\"") }.joined(separator: " ")
         let script = """
         tell application "iTerm2"
