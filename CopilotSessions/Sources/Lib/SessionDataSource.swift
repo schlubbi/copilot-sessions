@@ -126,6 +126,41 @@ public class SessionDataSource {
                         lastTs = parseISO8601(ts)
                     }
                 }
+            } else {
+                // Fallback: parse workspace.yaml + events.jsonl (newer format)
+                let yamlPath = "\(sessionBase)/\(sid)/workspace.yaml"
+                if let yamlStr = try? String(contentsOfFile: yamlPath, encoding: .utf8) {
+                    for line in yamlStr.components(separatedBy: "\n") {
+                        if line.hasPrefix("summary: ") {
+                            let val = String(line.dropFirst("summary: ".count)).trimmingCharacters(in: .whitespaces)
+                            if !val.isEmpty && val != "''" {
+                                topic = val
+                            }
+                        } else if line.hasPrefix("updated_at: ") {
+                            let val = String(line.dropFirst("updated_at: ".count)).trimmingCharacters(in: .whitespaces)
+                            lastTs = parseISO8601(val)
+                        }
+                    }
+                }
+
+                let eventsPath = "\(sessionBase)/\(sid)/events.jsonl"
+                if let eventsData = try? String(contentsOfFile: eventsPath, encoding: .utf8) {
+                    var userMsgCount = 0
+                    for line in eventsData.components(separatedBy: "\n") where !line.isEmpty {
+                        guard let lineData = line.data(using: .utf8),
+                              let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                              let type = obj["type"] as? String else { continue }
+                        if type == "user.message" {
+                            userMsgCount += 1
+                            if userMsgCount == 1, let data = obj["data"] as? [String: Any] {
+                                let msg = data["content"] as? String ?? ""
+                                fullMsg = msg
+                                if topic.isEmpty { topic = extractTopic(from: msg) }
+                            }
+                        }
+                    }
+                    turns = max(turns, userMsgCount)
+                }
             }
 
             let isAlive = activeSids.contains(sid)
